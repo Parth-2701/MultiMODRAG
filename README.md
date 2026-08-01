@@ -1,5 +1,7 @@
 # MultiMODRAG (VideoRAG)
 
+**Demo Video:** https://drive.google.com/file/d/1YuFa2tbaUQpfjlOQTbbrHpsQ1fEHN815/view?usp=sharing
+
 A multimodal Retrieval-Augmented Generation system for video. Upload an `.mp4`, and the backend samples it into frames, captions each frame, transcribes the audio track, embeds a fused visual+audio representation, and indexes everything in [Pixeltable](https://www.pixeltable.com/). A Next.js chat UI then lets you ask natural-language questions about the video — the backend runs hybrid (dense + keyword) search over the indexed frames, feeds the results plus the full transcript to Gemini, and Gemini can call an MCP tool to cut and return an actual video clip for the moment it's describing.
 
 ## Architecture
