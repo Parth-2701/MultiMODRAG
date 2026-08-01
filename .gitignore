@@ -1,0 +1,60 @@
+# ===== Environment / secrets =====
+.env
+.env.local
+.env.*.local
+*.env
+
+# ===== Python (backend) =====
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# uv (keep uv.lock committed — don't ignore it)
+# .python-version can stay tracked too, remove if you don't want it
+
+# ===== Node / Next.js (frontend) =====
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/.turbo/
+frontend/*.tsbuildinfo
+frontend/next-env.d.ts
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ===== MCP server (if it has its own env/deps) =====
+mcp_server/__pycache__/
+mcp_server/.venv/
+
+# ===== Media / storage (usually large + user-generated, don't commit) =====
+storage/clips/*
+storage/videos/*
+!storage/clips/.gitkeep
+!storage/videos/.gitkeep
+*.mp4
+*.mov
+*.avi
+*.mkv
+
+# ===== OS / editor junk =====
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# ===== Logs / misc =====
+*.log
+.cache/
