@@ -12,6 +12,10 @@ from google.genai import types
 
 # Import our database schema
 import schema
+try:
+    from backend.rag.hybrid_retrieval import hybrid_search
+except ImportError:
+    from rag.hybrid_retrieval import hybrid_search
 
 # MCP client (for the video-clip-extraction tool server on port 9090)
 from mcp import ClientSession
@@ -209,36 +213,11 @@ async def chat_with_agent(request: ChatRequest):
     # leftover frames from earlier test videos can outrank/replace the
     # video actually being asked about, especially early on when the newly
     # uploaded video's frames may still be null/processing.
-    frame_filter = frames.combined_caption != None
-    if request.video_path:
-        target_filename = os.path.basename(request.video_path)
-        # frames.video is NOT the original upload path. Pixeltable copies local
-        # media into its own internal cache (~/.pixeltable/media/...) and returns
-        # that hashed cache path from queries — comparing it against our own
-        # storage/videos/<file> path never matches. `title` is the column we
-        # control (set at insert time in process_video_background) and it's
-        # inherited unchanged into this view from the base `videos` table.
-        frame_filter = frame_filter & (frames.title == target_filename)
+    target_filename = os.path.basename(request.video_path) if request.video_path else None
+    ranked_frames = hybrid_search(frames, target_filename, user_msg, schema.FRAME_SAMPLE_FPS)
+    top_10_frames = ranked_frames[:10]
 
-    # 1. DENSE SEARCH (Vector Similarity)
-    # Pool size matters: capping this too low means a frame can be excluded
-    # before re-ranking ever sees it, even if that frame is exactly what the
-    # question needs (e.g. an opening frame with key exposition, ranked low
-    # on raw embedding similarity to a vague query wording). For typical
-    # short demo videos (a couple minutes at most), pulling every frame as a
-    # re-ranking candidate is cheap and maximizes recall.
-    total_frame_count = frames.where(frame_filter).count()
-    pool_size = max(total_frame_count, 15)
-
-    dense_results = (
-        frames.where(frame_filter)
-        .order_by(frames.combined_caption.similarity(user_msg))
-        .select(frames.pos, frames.combined_caption, frames.video, frames.title)
-        .limit(pool_size)
-        .collect()
-    )
-
-    if len(dense_results) == 0:
+    if len(top_10_frames) == 0:
         still_processing = any(status == "processing" for status in task_store.values())
         if still_processing:
             return ChatResponse(
@@ -254,48 +233,6 @@ async def chat_with_agent(request: ChatRequest):
                 clip_path=None,
             )
         return ChatResponse(message="I couldn't find any processed videos. Upload one first.", clip_path=None)
-    # 2. HYBRID RE-RANKING (Reciprocal Rank Fusion - RRF)
-    # We score the pool based on exact keyword overlap (Sparse / BM25 proxy)
-    query_terms = set(user_msg.lower().replace("?", "").replace(".", "").split())
-
-    # frames.pos is the frame's sequential INDEX in the sampled sequence, not
-    # a real timestamp — schema.FRAME_SAMPLE_FPS is the single source of
-    # truth for the sampling rate, imported directly so this file can't drift
-    # out of sync with it (the previous hardcoded copy here had already
-    # drifted: comment said 0.5, actual value was 1.0).
-    FRAME_SAMPLE_FPS = schema.FRAME_SAMPLE_FPS
-
-    ranked_frames = []
-    for i, row in enumerate(dense_results):
-        caption_text = row['combined_caption'].lower()
-        real_timestamp_seconds = row['pos'] / FRAME_SAMPLE_FPS
-
-        # Dense Rank (1 is best)
-        dense_rank = i + 1
-
-        # Sparse Score (How many exact words match)
-        keyword_hits = sum(1 for term in query_terms if term in caption_text and len(term) > 3)
-        # Convert score to a pseudo-rank (higher hits = better rank)
-        sparse_rank = 15 - keyword_hits
-
-        # The RRF Formula: 1 / (k + rank) where k is traditionally 60
-        k = 60
-        rrf_score = (1 / (k + dense_rank)) + (1 / (k + sparse_rank))
-
-        ranked_frames.append({
-            "pos": row['pos'],
-            "timestamp_seconds": real_timestamp_seconds,
-            "caption": row['combined_caption'],
-            "video_path": row['video'],  # source video path, needed for FFmpeg clip extraction
-            "source_filename": row['title'],
-            "score": rrf_score
-        })
-
-    # Sort by the new Hybrid RRF score
-    ranked_frames.sort(key=lambda x: x["score"], reverse=True)
-
-    # 3. Take Top 3 for the LLM
-    top_10_frames = ranked_frames[:10]
 
     context_str = ""
     top_timestamp = top_10_frames[0]['timestamp_seconds'] if top_10_frames else None
@@ -373,7 +310,8 @@ async def chat_with_agent(request: ChatRequest):
         # responding (or a dropped connection) can hang this forever with no
         # error. Give the SSE handshake and the read stream explicit timeouts
         # (seconds) so a stuck connection fails loudly instead of silently.
-        async with sse_client("http://localhost:9090/sse", timeout=90, sse_read_timeout=60) as (read_stream, write_stream):
+        mcp_url = os.environ.get("MCP_SERVER_URL", "http://localhost:9090/sse")
+        async with sse_client(mcp_url, timeout=90, sse_read_timeout=60) as (read_stream, write_stream):
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
 

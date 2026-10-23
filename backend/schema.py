@@ -14,7 +14,7 @@ def _patched_subprocess_run(*args, **kwargs):
     return _original_subprocess_run(*args, **kwargs)
  
 _subprocess.run = _patched_subprocess_run
-print("🔧 Patched subprocess.run: pg_ctl timeout extended to >=90s (Windows AV lock workaround)")
+print("[schema] Patched subprocess.run: pg_ctl timeout extended to >=90s (Windows AV lock workaround)")
 
 import pixeltable as pxt
 from pixeltable.functions.gemini import embed_content
