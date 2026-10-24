@@ -16,6 +16,10 @@ try:
     from backend.rag.hybrid_retrieval import hybrid_search
 except ImportError:
     from rag.hybrid_retrieval import hybrid_search
+try:
+    from backend.rag.transcript_rag import transcript_context
+except ImportError:
+    from rag.transcript_rag import transcript_context
 
 # MCP client (for the video-clip-extraction tool server on port 9090)
 from mcp import ClientSession
@@ -243,27 +247,13 @@ async def chat_with_agent(request: ChatRequest):
     for frame in top_10_frames:
         context_str += f"- At {frame['timestamp_seconds']:.1f} seconds: {frame['caption']}\n"
 
-    # Always fetch the FULL verbatim transcript as a separate, unconditional
-    # piece of context — not just whatever audio happened to get attached to
-    # the top-ranked frames. Names, dates, and expository facts are often
-    # spoken exactly once, early in a video, and never repeated; if that one
-    # frame doesn't rank into the top-10 for a given query (a ranking
-    # imperfection, not a data problem — the audio IS correctly attached to
-    # that frame's combined_caption), the model would otherwise have no way
-    # to know the fact/name existed at all. This guarantees it always does,
-    # regardless of how retrieval ranks any individual frame.
-    full_transcript_text = ""
+    # Fetch timestamped transcript context using dedicated transcript index (FIX-02)
+    transcript_ctx = ""
     try:
-        videos_tbl = pxt.get_table('video_rag.videos')
-        transcript_rows = (
-            videos_tbl.where(videos_tbl.title == source_video_name)
-            .select(videos_tbl.transcript)
-            .collect()
-        )
-        if len(transcript_rows) > 0 and isinstance(transcript_rows[0]['transcript'], dict):
-            full_transcript_text = (transcript_rows[0]['transcript'].get('text') or "").strip()
+        transcript_ctx = transcript_context(source_video_name, user_msg)
     except Exception as e:
-        print(f"⚠️  Could not fetch full transcript for context: {e}")
+        print(f"⚠️  Could not fetch transcript context: {e}")
+        transcript_ctx = ""
 
     # DEBUG: confirm what was actually retrieved before handing off to Gemini
     print("🔍 Top 10 retrieved frames:")
@@ -285,17 +275,16 @@ async def chat_with_agent(request: ChatRequest):
     You are a helpful video analysis assistant.
     The user asked: "{user_msg}"
 
-    Full spoken narration of this video (verbatim, in order — use this for
-    names, dates, and factual/narrative details, since it's the complete
-    audio track regardless of which specific frames were matched below):
-    {full_transcript_text if full_transcript_text else "(no speech detected in this video)"}
+    Relevant spoken narration with timestamps [mm:ss–mm:ss] (use this for
+    names, dates, and factual/narrative details):
+    {transcript_ctx if transcript_ctx else "(no speech detected in this video)"}
 
     Using a Hybrid Search, I also found these specific visual scenes in the
     source video '{source_video_name}' (use these for visual details and to
     pick a timestamp if the user wants a clip):
     {context_str}
 
-    Provide a friendly response using BOTH the full narration above and the
+    Provide a friendly response using BOTH the spoken narration above and the
     scene descriptions. Prefer specific names/dates from the narration over
     vague descriptions when they're available.
     If the user's request implies they want to *see* the video, watch the clip, or see a
