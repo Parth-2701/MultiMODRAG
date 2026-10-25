@@ -20,6 +20,20 @@ try:
     from backend.rag.transcript_rag import transcript_context
 except ImportError:
     from rag.transcript_rag import transcript_context
+try:
+    from backend.rag.prompting import (
+        build_user_content,
+        SYSTEM_INSTRUCTION,
+        MODEL,
+        TEMP,
+    )
+except ImportError:
+    from rag.prompting import (
+        build_user_content,
+        SYSTEM_INSTRUCTION,
+        MODEL,
+        TEMP,
+    )
 
 # MCP client (for the video-clip-extraction tool server on port 9090)
 from mcp import ClientSession
@@ -271,26 +285,13 @@ async def chat_with_agent(request: ChatRequest):
         chat_memory.append({"role": "assistant", "content": ai_response})
         return ChatResponse(message=ai_response, clip_path=None)
 
-    prompt = f"""
-    You are a helpful video analysis assistant.
-    The user asked: "{user_msg}"
-
-    Relevant spoken narration with timestamps [mm:ss–mm:ss] (use this for
-    names, dates, and factual/narrative details):
-    {transcript_ctx if transcript_ctx else "(no speech detected in this video)"}
-
-    Using a Hybrid Search, I also found these specific visual scenes in the
-    source video '{source_video_name}' (use these for visual details and to
-    pick a timestamp if the user wants a clip):
-    {context_str}
-
-    Provide a friendly response using BOTH the spoken narration above and the
-    scene descriptions. Prefer specific names/dates from the narration over
-    vague descriptions when they're available.
-    If the user's request implies they want to *see* the video, watch the clip, or see a
-    specific moment, YOU MUST use the extract_video_clip tool using '{source_video_name}'
-    and the relevant timestamp.
-    """
+    visual_items = [(f['timestamp_seconds'], f['caption']) for f in top_10_frames]
+    user_content = build_user_content(
+        question=user_msg,
+        visual_items=visual_items,
+        speech_ctx=transcript_ctx,
+        video_name=source_video_name,
+    )
 
     try:
         # Connect to the FastMCP microservice (video clip extraction tool)
@@ -326,13 +327,16 @@ async def chat_with_agent(request: ChatRequest):
                 # it with wait_for so a stall raises asyncio.TimeoutError instead
                 # of blocking the request indefinitely.
                 print("📤 Sending prompt to Gemini (with tools)...")
+                call_config = types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    temperature=TEMP,
+                    tools=gemini_tools,
+                )
                 response = await asyncio.wait_for(
                     genai_client.aio.models.generate_content(
-                        model="gemini-2.5-flash",
-                        contents=prompt,
-                        config=types.GenerateContentConfig(
-                            tools=gemini_tools,
-                        )
+                        model=MODEL,
+                        contents=user_content,
+                        config=call_config,
                     ),
                     timeout=30,
                 )
@@ -362,18 +366,16 @@ async def chat_with_agent(request: ChatRequest):
                             print("📤 Sending tool result back to Gemini...")
                             response = await asyncio.wait_for(
                                 genai_client.aio.models.generate_content(
-                                    model="gemini-2.5-flash",
+                                    model=MODEL,
                                     contents=[
-                                        prompt,
+                                        user_content,
                                         response.candidates[0].content,
                                         types.Part.from_function_response(
                                             name=tool_name,
                                             response={"result": tool_result_text}
                                         )
                                     ],
-                                    config=types.GenerateContentConfig(
-                                        tools=gemini_tools,
-                                    )
+                                    config=call_config,
                                 ),
                                 timeout=30,
                             )
@@ -394,8 +396,12 @@ async def chat_with_agent(request: ChatRequest):
         print("↩️  Falling back to plain Gemini call without tools...")
         try:
             response = await genai_client.aio.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt,
+                model=MODEL,
+                contents=user_content,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    temperature=TEMP,
+                ),
             )
             ai_response = response.text
         except Exception as inner_e:
