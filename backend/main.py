@@ -34,6 +34,10 @@ except ImportError:
         MODEL,
         TEMP,
     )
+try:
+    from backend.rag.spans import to_spans
+except ImportError:
+    from rag.spans import to_spans
 
 # MCP client (for the video-clip-extraction tool server on port 9090)
 from mcp import ClientSession
@@ -233,9 +237,8 @@ async def chat_with_agent(request: ChatRequest):
     # uploaded video's frames may still be null/processing.
     target_filename = os.path.basename(request.video_path) if request.video_path else None
     ranked_frames = hybrid_search(frames, target_filename, user_msg, schema.FRAME_SAMPLE_FPS)
-    top_10_frames = ranked_frames[:10]
 
-    if len(top_10_frames) == 0:
+    if len(ranked_frames) == 0:
         still_processing = any(status == "processing" for status in task_store.values())
         if still_processing:
             return ChatResponse(
@@ -252,14 +255,10 @@ async def chat_with_agent(request: ChatRequest):
             )
         return ChatResponse(message="I couldn't find any processed videos. Upload one first.", clip_path=None)
 
-    context_str = ""
-    top_timestamp = top_10_frames[0]['timestamp_seconds'] if top_10_frames else None
-
-    # Filename from the Pixeltable file path (e.g. 'storage/videos/vid.mp4' -> 'vid.mp4')
-    source_video_name = top_10_frames[0]['source_filename'] if top_10_frames else "unknown.mp4"
-
-    for frame in top_10_frames:
-        context_str += f"- At {frame['timestamp_seconds']:.1f} seconds: {frame['caption']}\n"
+    # Convert ranked frame hits into cohesive, deduplicated temporal spans (FIX-04)
+    spans = to_spans(ranked_frames[:30], schema.FRAME_SAMPLE_FPS)
+    top_timestamp = spans[0]['start'] if spans else (ranked_frames[0]['timestamp_seconds'] if ranked_frames else None)
+    source_video_name = spans[0]['source_filename'] if spans else (ranked_frames[0]['source_filename'] if ranked_frames else "unknown.mp4")
 
     # Fetch timestamped transcript context using dedicated transcript index (FIX-02)
     transcript_ctx = ""
@@ -269,10 +268,10 @@ async def chat_with_agent(request: ChatRequest):
         print(f"⚠️  Could not fetch transcript context: {e}")
         transcript_ctx = ""
 
-    # DEBUG: confirm what was actually retrieved before handing off to Gemini
-    print("🔍 Top 10 retrieved frames:")
-    for frame in top_10_frames:
-        print(f"    pos={frame['pos']} timestamp={frame['timestamp_seconds']:.1f}s caption={frame['caption'][:80]!r}")
+    # DEBUG: confirm what spans were generated before handing off to Gemini
+    print(f"🔍 Generated {len(spans)} temporal spans:")
+    for s in spans:
+        print(f"    [{s['start']:.1f}s–{s['end']:.1f}s] score={s['score']:.4f} text={s['text'][:80]!r}")
 
     # 4. LLM Synthesis WITH MCP TOOL CALLING
     final_clip_path: Optional[str] = None
@@ -285,7 +284,7 @@ async def chat_with_agent(request: ChatRequest):
         chat_memory.append({"role": "assistant", "content": ai_response})
         return ChatResponse(message=ai_response, clip_path=None)
 
-    visual_items = [(f['timestamp_seconds'], f['caption']) for f in top_10_frames]
+    visual_items = [(s['start'], s['text']) for s in spans]
     user_content = build_user_content(
         question=user_msg,
         visual_items=visual_items,

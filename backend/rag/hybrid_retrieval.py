@@ -7,7 +7,7 @@ from snowballstemmer import stemmer        # pip install snowballstemmer
 
 K_DENSE = int(os.environ.get("K_DENSE", 40))
 K_SPARSE = int(os.environ.get("K_SPARSE", 40))
-K_OUT = int(os.environ.get("K_OUT", 10))
+K_OUT = int(os.environ.get("K_OUT", 30))
 RRF_K = 60
 TOKEN_RE = re.compile(r"[a-z0-9]+(?:'[a-z]+)?")
 STOP = {
