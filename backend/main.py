@@ -11,7 +11,10 @@ from google import genai
 from google.genai import types
 
 # Import our database schema
-import schema
+try:
+    import schema
+except ImportError:
+    from backend import schema
 try:
     from backend.rag.hybrid_retrieval import hybrid_search
 except ImportError:
@@ -38,6 +41,22 @@ try:
     from backend.rag.spans import to_spans
 except ImportError:
     from rag.spans import to_spans
+try:
+    from backend.rag.conversation import (
+        add as mem_add,
+        history as mem_history,
+        history_text as mem_history_text,
+        clear as mem_clear,
+        condense_query,
+    )
+except ImportError:
+    from rag.conversation import (
+        add as mem_add,
+        history as mem_history,
+        history_text as mem_history_text,
+        clear as mem_clear,
+        condense_query,
+    )
 
 # MCP client (for the video-clip-extraction tool server on port 9090)
 from mcp import ClientSession
@@ -89,6 +108,7 @@ class ChatRequest(BaseModel):
     message: str
     video_path: Optional[str] = None
     image_base64: Optional[str] = None
+    session_id: Optional[str] = None
 
 class ChatResponse(BaseModel):
     message: str
@@ -222,7 +242,14 @@ async def list_videos():
 @app.post("/api/v1/chat", response_model=ChatResponse)
 async def chat_with_agent(request: ChatRequest):
     user_msg = request.message
-    chat_memory.append({"role": "user", "content": user_msg})
+    sid = request.session_id or "default"
+    target_filename = os.path.basename(request.video_path) if request.video_path else None
+    video_key = target_filename or ""
+
+    # Condense query if follow-up refers to prior conversation turns (FIX-07)
+    standalone_query = await condense_query(genai_client, sid, video_key, user_msg)
+    if standalone_query != user_msg:
+        print(f"🔄 [FIX-07] Condensed query: {user_msg!r} -> {standalone_query!r}")
 
     import pixeltable as pxt
     try:
@@ -230,13 +257,8 @@ async def chat_with_agent(request: ChatRequest):
     except pxt.exceptions.Error:
         raise HTTPException(status_code=500, detail="Database not initialized. Upload a video first.")
 
-    # Scope the search to the specific video the user is asking about.
-    # Without this, the search runs across EVERY video ever uploaded — so
-    # leftover frames from earlier test videos can outrank/replace the
-    # video actually being asked about, especially early on when the newly
-    # uploaded video's frames may still be null/processing.
-    target_filename = os.path.basename(request.video_path) if request.video_path else None
-    ranked_frames = hybrid_search(frames, target_filename, user_msg, schema.FRAME_SAMPLE_FPS)
+    # Scope search to specific video using standalone_query
+    ranked_frames = hybrid_search(frames, target_filename, standalone_query, schema.FRAME_SAMPLE_FPS)
 
     if len(ranked_frames) == 0:
         still_processing = any(status == "processing" for status in task_store.values())
@@ -263,9 +285,9 @@ async def chat_with_agent(request: ChatRequest):
     # Fetch timestamped transcript context using dedicated transcript index (FIX-02)
     transcript_ctx = ""
     try:
-        transcript_ctx = transcript_context(source_video_name, user_msg)
+        transcript_ctx = transcript_context(source_video_name, standalone_query)
     except Exception as e:
-        print(f"⚠️  Could not fetch transcript context: {e}")
+        print(f"[warn] Could not fetch transcript context: {e}")
         transcript_ctx = ""
 
     # DEBUG: confirm what spans were generated before handing off to Gemini
@@ -281,8 +303,15 @@ async def chat_with_agent(request: ChatRequest):
             f"I found relevant scenes at {top_timestamp}s, but text generation is "
             f"unavailable (GEMINI_API_KEY not configured)."
         )
+        mem_add(sid, video_key, "user", user_msg)
+        mem_add(sid, video_key, "assistant", ai_response)
+        chat_memory.append({"role": "user", "content": user_msg})
         chat_memory.append({"role": "assistant", "content": ai_response})
         return ChatResponse(message=ai_response, clip_path=None)
+
+    # Scoped conversation history injection (FIX-07)
+    hist_entries = mem_history(sid, video_key)
+    hist_text = mem_history_text(hist_entries)
 
     visual_items = [(s['start'], s['text']) for s in spans]
     user_content = build_user_content(
@@ -290,6 +319,7 @@ async def chat_with_agent(request: ChatRequest):
         visual_items=visual_items,
         speech_ctx=transcript_ctx,
         video_name=source_video_name,
+        history_text=hist_text,
     )
 
     try:
@@ -408,6 +438,9 @@ async def chat_with_agent(request: ChatRequest):
             ai_response = f"I found relevant scenes at {top_timestamp}s, but my text generator failed."
         final_clip_path = None
 
+    mem_add(sid, video_key, "user", user_msg)
+    mem_add(sid, video_key, "assistant", ai_response)
+    chat_memory.append({"role": "user", "content": user_msg})
     chat_memory.append({"role": "assistant", "content": ai_response})
 
     return ChatResponse(message=ai_response, clip_path=final_clip_path)
@@ -426,11 +459,19 @@ async def debug_frames():
     return {"count": len(rows), "rows": list(rows)}
 
 @app.get("/api/v1/chat/history")
-async def get_chat_history():
+async def get_chat_history(session_id: Optional[str] = None, video_path: Optional[str] = None):
+    if session_id or video_path:
+        sid = session_id or "default"
+        title = os.path.basename(video_path) if video_path else ""
+        hist = mem_history(sid, title)
+        return {"history": [{"role": r, "content": c} for r, c in hist]}
     return {"history": chat_memory}
 
 @app.delete("/api/v1/chat/memory")
-async def clear_memory():
+async def clear_memory(session_id: Optional[str] = None, video_path: Optional[str] = None):
     global chat_memory
     chat_memory = []
+    sid = session_id if session_id else (None if not video_path else "default")
+    title = os.path.basename(video_path) if video_path else None
+    mem_clear(sid, title)
     return {"status": "Memory cleared"}
