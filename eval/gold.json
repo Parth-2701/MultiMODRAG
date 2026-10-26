@@ -1,0 +1,124 @@
+{
+  "videos": [
+    {
+      "title": "maurya_demo..mp4",
+      "questions": [
+        {
+          "id": "m1",
+          "type": "needle",
+          "question": "In whose royal court does the video take place in the 4th century BCE?",
+          "gold_spans": [[0.0, 6.0]],
+          "gold_answer": "Dhananand"
+        },
+        {
+          "id": "m2",
+          "type": "needle",
+          "question": "What did Pandit Vishnu Gupta advise the king to form?",
+          "gold_spans": [[7.9, 15.5]],
+          "gold_answer": "A nationwide alliance to tackle incoming foreign aggression."
+        },
+        {
+          "id": "m3",
+          "type": "needle",
+          "question": "Why did Pandit Vishnu Gupta untie his top knot in anger?",
+          "gold_spans": [[16.5, 29.0]],
+          "gold_answer": "Because the king ridiculed his concerns and discredited him."
+        },
+        {
+          "id": "m4",
+          "type": "needle",
+          "question": "What vow did Vishnu Gupta take regarding the king?",
+          "gold_spans": [[30.0, 38.0]],
+          "gold_answer": "That he would not tie back his top knot until the king and his supporters were uprooted like trees in a storm."
+        },
+        {
+          "id": "m5",
+          "type": "temporal",
+          "question": "What happened after the king ridiculed and discredited Vishnu Gupta?",
+          "gold_spans": [[24.0, 38.0]],
+          "gold_answer": "Enraged, Vishnu Gupta untied his top knot and vowed to uproot the king and his supporters."
+        },
+        {
+          "id": "m6",
+          "type": "summary",
+          "question": "Summarize what happens between Pandit Vishnu Gupta and King Dhananand in the court.",
+          "gold_spans": [[0.0, 38.0]],
+          "gold_answer": "Pandit Vishnu Gupta advised King Dhananand to form an alliance against foreign aggression, but the arrogant king ridiculed him. In fury, Vishnu Gupta untied his top knot and vowed to destroy Dhananand's rule."
+        }
+      ]
+    },
+    {
+      "title": "vid.mp4",
+      "questions": [
+        {
+          "id": "v1",
+          "type": "needle",
+          "question": "What are the first four terrestrial planets mentioned?",
+          "gold_spans": [[0.0, 3.8]],
+          "gold_answer": "Mercury, Venus, Earth, and Mars."
+        },
+        {
+          "id": "v2",
+          "type": "needle",
+          "question": "Which gas giants and outer planets are listed after Mars?",
+          "gold_spans": [[3.8, 9.6]],
+          "gold_answer": "Jupiter, Saturn, Uranus, and Neptune."
+        },
+        {
+          "id": "v3",
+          "type": "temporal",
+          "question": "What planets are named immediately after Earth?",
+          "gold_spans": [[2.0, 8.5]],
+          "gold_answer": "Mars, followed by Jupiter, Saturn, Uranus, and Neptune."
+        },
+        {
+          "id": "v4",
+          "type": "summary",
+          "question": "Summarize what is being recited in this video.",
+          "gold_spans": [[0.0, 10.0]],
+          "gold_answer": "The speaker recites the order of the planets in the solar system from Mercury to Neptune."
+        }
+      ]
+    },
+    {
+      "title": "sample.mp4",
+      "questions": [
+        {
+          "id": "s1",
+          "type": "needle",
+          "question": "When is the purple butterfly perched on the rabbit's forehead?",
+          "gold_spans": [[2.0, 4.5]],
+          "gold_answer": "A bright purple and pink butterfly perches on the rabbit's forehead while it sits in the grass."
+        },
+        {
+          "id": "s2",
+          "type": "needle",
+          "question": "When does the apple fall on the butterfly?",
+          "gold_spans": [[6.0, 8.5]],
+          "gold_answer": "A red apple falls from above and hits the butterfly around 7 seconds into the video."
+        },
+        {
+          "id": "s3",
+          "type": "needle",
+          "question": "When does the rabbit look down at the round red fruit on the ground?",
+          "gold_spans": [[8.0, 10.0]],
+          "gold_answer": "Around 8 to 10 seconds, the rabbit stands in the grass looking down with paws near its chest at the red fruit on the ground."
+        },
+        {
+          "id": "s4",
+          "type": "temporal",
+          "question": "What happens after the butterfly lands on the rabbit's face?",
+          "gold_spans": [[4.5, 8.5]],
+          "gold_answer": "The rabbit stands up in the meadow, and then an apple drops down onto the butterfly."
+        },
+        {
+          "id": "s5",
+          "type": "summary",
+          "question": "Summarize what happens to the rabbit and the butterfly in this meadow scene.",
+          "gold_spans": [[0.0, 10.0]],
+          "gold_answer": "A rabbit admires a butterfly resting on its head, but after standing up, a falling apple strikes the butterfly, leaving the rabbit gazing down at the fruit in confusion."
+        }
+      ]
+    }
+  ]
+}

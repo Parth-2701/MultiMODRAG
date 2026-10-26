@@ -39,7 +39,7 @@ FRAME_SAMPLE_FPS = 1.0
 #    the pay-per-request credits that HF Inference Providers uses.
 api_key = os.environ.get("GEMINI_API_KEY")
 if not api_key or api_key == "your-gemini-api-key-here":
-    print("⚠️  GEMINI_API_KEY not set — needed for captioning, embeddings, "
+    print("[warn]  GEMINI_API_KEY not set — needed for captioning, embeddings, "
           "and main.py's chat endpoint.")
 
 # 3. Local fallback vision-language model: Florence-2 (microsoft/Florence-2-base)
@@ -54,16 +54,23 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 TORCH_DTYPE = torch.float16 if DEVICE == "cuda" else torch.float32
 FLORENCE_MODEL_ID = "microsoft/Florence-2-base"  # swap to "-large" (0.77B) for a quality bump
 
-print(f"Loading Florence-2 ({FLORENCE_MODEL_ID}) on {DEVICE} as fallback captioner...")
-_florence_model = AutoModelForCausalLM.from_pretrained(
-    FLORENCE_MODEL_ID,
-    torch_dtype=TORCH_DTYPE,
-    trust_remote_code=True,
-).to(DEVICE).eval()
-_florence_processor = AutoProcessor.from_pretrained(
-    FLORENCE_MODEL_ID, trust_remote_code=True
-)
-print("✅ Florence-2 fallback loaded.")
+_florence_model = None
+_florence_processor = None
+
+def _get_florence():
+    global _florence_model, _florence_processor
+    if _florence_model is None:
+        print(f"[schema] Loading Florence-2 ({FLORENCE_MODEL_ID}) on {DEVICE} as fallback captioner...")
+        _florence_model = AutoModelForCausalLM.from_pretrained(
+            FLORENCE_MODEL_ID,
+            torch_dtype=TORCH_DTYPE,
+            trust_remote_code=True,
+        ).to(DEVICE).eval()
+        _florence_processor = AutoProcessor.from_pretrained(
+            FLORENCE_MODEL_ID, trust_remote_code=True
+        )
+        print("[schema] Florence-2 fallback loaded.")
+    return _florence_model, _florence_processor
 
 FLORENCE_TASK_PROMPT = "<MORE_DETAILED_CAPTION>"
 
@@ -78,12 +85,13 @@ def _run_florence(frame) -> str:
         if frame.mode != "RGB":
             frame = frame.convert("RGB")
 
-        inputs = _florence_processor(
+        model, processor = _get_florence()
+        inputs = processor(
             text=FLORENCE_TASK_PROMPT, images=frame, return_tensors="pt"
         ).to(DEVICE, TORCH_DTYPE)
 
         with torch.no_grad():
-            generated_ids = _florence_model.generate(
+            generated_ids = model.generate(
                 input_ids=inputs["input_ids"],
                 pixel_values=inputs["pixel_values"],
                 max_new_tokens=256,
@@ -91,11 +99,11 @@ def _run_florence(frame) -> str:
                 do_sample=False,
             )
 
-        generated_text = _florence_processor.batch_decode(
+        generated_text = processor.batch_decode(
             generated_ids, skip_special_tokens=False
         )[0]
 
-        parsed = _florence_processor.post_process_generation(
+        parsed = processor.post_process_generation(
             generated_text,
             task=FLORENCE_TASK_PROMPT,
             image_size=(frame.width, frame.height),
@@ -104,7 +112,7 @@ def _run_florence(frame) -> str:
         caption = parsed.get(FLORENCE_TASK_PROMPT, "").strip()
         return caption if caption else "unlabeled visual content"
     except Exception as e:
-        print(f"⚠️  Florence-2 fallback also failed for one frame: {e}")
+        print(f"[warn]  Florence-2 fallback also failed for one frame: {e}")
         return "unlabeled visual content"
 
 
@@ -126,9 +134,15 @@ def florence_caption(frame: pxt.Image) -> str:
 from faster_whisper import WhisperModel
 
 WHISPER_MODEL_SIZE = "base.en"  # drop to "tiny.en" if memory is tight on deploy
-print(f"Loading faster-whisper ({WHISPER_MODEL_SIZE})...")
-_whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
-print("✅ faster-whisper loaded.")
+_whisper_model = None
+
+def _get_whisper():
+    global _whisper_model
+    if _whisper_model is None:
+        print(f"[schema] Loading faster-whisper ({WHISPER_MODEL_SIZE})...")
+        _whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
+        print("[schema] faster-whisper loaded.")
+    return _whisper_model
 
 
 @pxt.udf
@@ -142,7 +156,8 @@ def transcribe_audio(audio: pxt.Audio) -> dict:
     try:
         if audio is None:
             return {"text": "", "segments": []}
-        segments_iter, _info = _whisper_model.transcribe(audio, beam_size=1)
+        whisper = _get_whisper()
+        segments_iter, _info = whisper.transcribe(audio, beam_size=1)
         segments = []
         text_parts = []
         for seg in segments_iter:
@@ -150,7 +165,7 @@ def transcribe_audio(audio: pxt.Audio) -> dict:
             text_parts.append(seg.text)
         return {"text": " ".join(text_parts).strip(), "segments": segments}
     except Exception as e:
-        print(f"⚠️  faster-whisper transcription failed: {e}")
+        print(f"[warn]  faster-whisper transcription failed: {e}")
         return {"text": "", "segments": []}
 
 
@@ -244,13 +259,13 @@ def gemini_caption(frame: pxt.Image) -> str:
             caption = (response.text or "").strip()
             if caption:
                 return caption
-            print(f"⚠️  {model_id} returned an empty caption, trying next model...")
+            print(f"[warn]  {model_id} returned an empty caption, trying next model...")
         except Exception as e:
             reason = "rate-limited" if _is_rate_limit_error(e) else f"{type(e).__name__}: {e!r}"
-            print(f"⚠️  {model_id} failed ({reason}), trying next model...")
+            print(f"[warn]  {model_id} failed ({reason}), trying next model...")
             continue
 
-    print("⚠️  All Gemini caption models failed for one frame, falling back to Florence-2.")
+    print("[warn]  All Gemini caption models failed for one frame, falling back to Florence-2.")
     return _run_florence(frame)
 
 
@@ -349,7 +364,7 @@ def backfill_combined_captions(title: str) -> None:
 
     video_rows = videos.where(videos.title == title).select(videos.transcript).collect()
     if len(video_rows) == 0:
-        print(f"⚠️  backfill_combined_captions: no video row found for title={title!r}")
+        print(f"[warn]  backfill_combined_captions: no video row found for title={title!r}")
         return
     transcript = video_rows[0]['transcript']
 
@@ -366,7 +381,7 @@ def backfill_combined_captions(title: str) -> None:
             {'combined_caption': text}
         )
 
-    print(f"✅ Backfilled combined_caption for {len(frame_rows)} frame(s) of {title!r}.")
+    print(f"[schema] Backfilled combined_caption for {len(frame_rows)} frame(s) of {title!r}.")
 
 
 # 5. Wrap schema creation in a function to prevent transaction locks on import
@@ -441,7 +456,7 @@ def setup_db():
         embedding=embed_content.using(model='gemini-embedding-001'),
         if_exists='replace'
     )
-    print("✅ Schema setup complete.")
+    print("[schema] Schema setup complete.")
 
 
 if __name__ == "__main__":
