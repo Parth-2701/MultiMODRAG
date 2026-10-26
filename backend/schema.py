@@ -16,6 +16,9 @@ def _patched_subprocess_run(*args, **kwargs):
 _subprocess.run = _patched_subprocess_run
 print("[schema] Patched subprocess.run: pg_ctl timeout extended to >=90s (Windows AV lock workaround)")
 
+# Ensure 'schema' alias exists so Pixeltable catalog can resolve UDFs registered under either 'schema' or 'backend.schema'
+sys.modules.setdefault("schema", sys.modules[__name__])
+
 import pixeltable as pxt
 from pixeltable.functions.gemini import embed_content
 from pixeltable.functions.video import frame_iterator
@@ -269,32 +272,48 @@ def gemini_caption(frame: pxt.Image) -> str:
     return _run_florence(frame)
 
 
-# --- Shared filler-word stripping, used by both visual and audio text cleaning ---
+# --- FIX-06: Text cleaning preserving grammatical phrasing, meaning, and casing ---
+import re
+
+_DISFLUENCY = re.compile(r"\b(?:u+m+|u+h+|e+r+m*|h+m+)\b[.,?!;:]*\s*", re.I)
+_WS = re.compile(r"\s+")
+
+
+def _normalize_ws(text: str) -> str:
+    """Normalizes multiple whitespace characters into a single space and strips."""
+    return _WS.sub(" ", text).strip() if text else ""
+
+
 def _strip_fillers(text: str) -> str:
+    """Removes vocal disfluencies (um, uh, erm, hm) from spoken audio while preserving
+    grammatical words ('like', 'actually', 'you know', 'basically') and proper casing."""
     if not text or not text.strip():
         return ""
-    fillers = [' um ', ' uh ', ' you know ', ' like ', ' basically ', ' actually ']
-    cleaned = " " + text.lower() + " "
-    for filler in fillers:
-        cleaned = cleaned.replace(filler, ' ')
-    return cleaned.strip()
+    cleaned = _DISFLUENCY.sub("", text)
+    return _normalize_ws(cleaned)
+
+
+def _compress_text(text: str) -> str:
+    """Normalizes whitespace in visual captions without lowercasing or destroying
+    grammatical words. Preserves 'unlabeled visual content' fallback for frames that have no caption."""
+    cleaned = _normalize_ws(text) if text else ""
+    return cleaned if cleaned else "unlabeled visual content"
+
+
+def _clean_audio_text(text: str) -> str:
+    """Strips vocal disfluencies from spoken audio text, returning empty string
+    for silent frames (presence/absence of speech is meaningful)."""
+    return _strip_fillers(text)
 
 
 @pxt.udf
 def compress_text(text: str) -> str:
-    """Removes conversational filler words from the VISUAL caption. Keeps the
-    'unlabeled visual content' fallback so downstream columns/embeddings never
-    see an empty string for a frame that has no caption at all."""
-    cleaned = _strip_fillers(text)
-    return cleaned if cleaned else "unlabeled visual content"
+    return _compress_text(text)
 
 
 @pxt.udf
 def clean_audio_text(text: str) -> str:
-    """Same filler-stripping as compress_text, but returns "" (not a fallback
-    placeholder) for silent frames — presence/absence of speech is itself
-    meaningful and shouldn't be papered over with fake text."""
-    return _strip_fillers(text)
+    return _clean_audio_text(text)
 
 
 # --- Audio: align Whisper's segment-level transcript to each frame's real
@@ -332,7 +351,7 @@ def clean_audio_text(text: str) -> str:
 # proven reads correctly — sidesteps the computed-column DAG for this one
 # cross-table dependency entirely.
 def _compute_combined_caption_text(visual_caption: str, transcript: dict, timestamp: float) -> str:
-    visual_caption = (visual_caption or "").strip()
+    visual_caption = _normalize_ws(visual_caption)
 
     segments = []
     if isinstance(transcript, dict):
