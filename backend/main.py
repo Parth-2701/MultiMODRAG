@@ -63,6 +63,10 @@ try:
 except ImportError:
     from rag.routing import route, get_policy
     from rag.summaries import ensure_summary, format_summary_context
+try:
+    from backend.rag.rerank import rerank
+except ImportError:
+    from rag.rerank import rerank
 
 # MCP client (for the video-clip-extraction tool server on port 9090)
 from mcp import ClientSession
@@ -290,8 +294,11 @@ async def chat_with_agent(request: ChatRequest):
             )
         return ChatResponse(message="I couldn't find any processed videos. Upload one first.", clip_path=None)
 
-    # Convert ranked frame hits into cohesive, deduplicated temporal spans (FIX-04 & FIX-08)
-    all_spans = to_spans(ranked_frames[:30], schema.FRAME_SAMPLE_FPS)
+    # Second-stage reranking over fused candidates (FIX-09)
+    reranked_frames = await rerank(genai_client, standalone_query, ranked_frames[:30])
+
+    # Convert ranked frame hits into cohesive, deduplicated temporal spans (FIX-04, FIX-08, FIX-09)
+    all_spans = to_spans(reranked_frames, schema.FRAME_SAMPLE_FPS)
     k_spans_limit = policy.get("k_spans", 6)
     if policy.get("order") == "chronological":
         spans = sorted(all_spans[:k_spans_limit], key=lambda s: s["start"])
