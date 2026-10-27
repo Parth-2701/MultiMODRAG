@@ -57,6 +57,12 @@ except ImportError:
         clear as mem_clear,
         condense_query,
     )
+try:
+    from backend.rag.routing import route, get_policy
+    from backend.rag.summaries import ensure_summary, format_summary_context
+except ImportError:
+    from rag.routing import route, get_policy
+    from rag.summaries import ensure_summary, format_summary_context
 
 # MCP client (for the video-clip-extraction tool server on port 9090)
 from mcp import ClientSession
@@ -90,8 +96,10 @@ STORAGE_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "storage"))
 VIDEOS_DIR = os.path.join(STORAGE_DIR, "videos")
 CLIPS_DIR = os.path.join(STORAGE_DIR, "clips")
 
+SUMMARIES_DIR = os.path.join(STORAGE_DIR, "summaries")
 os.makedirs(VIDEOS_DIR, exist_ok=True)
 os.makedirs(CLIPS_DIR, exist_ok=True)
+os.makedirs(SUMMARIES_DIR, exist_ok=True)
 
 # --- google.genai SDK: create a Client instead of calling configure() ---
 api_key = os.environ.get("GEMINI_API_KEY")
@@ -251,6 +259,11 @@ async def chat_with_agent(request: ChatRequest):
     if standalone_query != user_msg:
         print(f"🔄 [FIX-07] Condensed query: {user_msg!r} -> {standalone_query!r}")
 
+    # Classify query intent and determine policy (FIX-08)
+    intent_class = route(standalone_query)
+    policy = get_policy(intent_class)
+    print(f"🧭 [FIX-08] Intent class: {intent_class} (k_spans={policy['k_spans']}, use_summary={policy['use_summary']}, order={policy['order']})")
+
     import pixeltable as pxt
     try:
         frames = pxt.get_table('video_rag.frames')
@@ -277,8 +290,14 @@ async def chat_with_agent(request: ChatRequest):
             )
         return ChatResponse(message="I couldn't find any processed videos. Upload one first.", clip_path=None)
 
-    # Convert ranked frame hits into cohesive, deduplicated temporal spans (FIX-04)
-    spans = to_spans(ranked_frames[:30], schema.FRAME_SAMPLE_FPS)
+    # Convert ranked frame hits into cohesive, deduplicated temporal spans (FIX-04 & FIX-08)
+    all_spans = to_spans(ranked_frames[:30], schema.FRAME_SAMPLE_FPS)
+    k_spans_limit = policy.get("k_spans", 6)
+    if policy.get("order") == "chronological":
+        spans = sorted(all_spans[:k_spans_limit], key=lambda s: s["start"])
+    else:
+        spans = all_spans[:k_spans_limit]
+
     top_timestamp = spans[0]['start'] if spans else (ranked_frames[0]['timestamp_seconds'] if ranked_frames else None)
     source_video_name = spans[0]['source_filename'] if spans else (ranked_frames[0]['source_filename'] if ranked_frames else "unknown.mp4")
 
@@ -290,8 +309,18 @@ async def chat_with_agent(request: ChatRequest):
         print(f"[warn] Could not fetch transcript context: {e}")
         transcript_ctx = ""
 
+    # Global summary generation if required by policy (FIX-08)
+    summary_ctx = ""
+    if policy.get("use_summary"):
+        try:
+            sum_data = await ensure_summary(genai_client, source_video_name)
+            summary_ctx = format_summary_context(sum_data)
+        except Exception as e:
+            print(f"[warn] Could not build summary context: {e}")
+            summary_ctx = ""
+
     # DEBUG: confirm what spans were generated before handing off to Gemini
-    print(f"🔍 Generated {len(spans)} temporal spans:")
+    print(f"🔍 Generated {len(spans)} temporal spans (intent={intent_class}):")
     for s in spans:
         print(f"    [{s['start']:.1f}s–{s['end']:.1f}s] score={s['score']:.4f} text={s['text'][:80]!r}")
 
@@ -320,6 +349,8 @@ async def chat_with_agent(request: ChatRequest):
         speech_ctx=transcript_ctx,
         video_name=source_video_name,
         history_text=hist_text,
+        summary_ctx=summary_ctx,
+        warn_approximate=policy.get("warn_approximate", False),
     )
 
     try:
