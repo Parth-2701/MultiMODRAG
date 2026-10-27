@@ -78,12 +78,13 @@ def _get_florence():
 FLORENCE_TASK_PROMPT = "<MORE_DETAILED_CAPTION>"
 
 
-def _run_florence(frame) -> str:
+def _run_florence(frame):
     """Raw Florence-2 inference on a single frame. Plain function (not a UDF) so it
     can be called both as its own UDF and as the fallback from inside
-    gemini_caption without any cross-UDF-invocation weirdness."""
+    gemini_caption without any cross-UDF-invocation weirdness.
+    Returns None on failure (no dummy failure sentinels)."""
     if frame is None:
-        return "unlabeled visual content"
+        return None
     try:
         if frame.mode != "RGB":
             frame = frame.convert("RGB")
@@ -113,10 +114,10 @@ def _run_florence(frame) -> str:
         )
 
         caption = parsed.get(FLORENCE_TASK_PROMPT, "").strip()
-        return caption if caption else "unlabeled visual content"
+        return caption if caption else None
     except Exception as e:
         print(f"[warn]  Florence-2 fallback also failed for one frame: {e}")
-        return "unlabeled visual content"
+        return None
 
 
 @pxt.udf
@@ -245,7 +246,15 @@ def parse_and_assemble_caption(raw_text: str) -> str:
         return raw_text.strip()
 
 
+import time
+from typing import Optional, Dict, Any
+
 _genai_client = genai.Client(api_key=api_key) if api_key else None
+
+# FIX-11: Circuit breaker state per cascade model (until timestamp, consecutive failures)
+_model_state: Dict[str, Dict[str, Any]] = {
+    m: {"until": 0.0, "consecutive_fails": 0} for m in GEMINI_CAPTION_MODELS
+}
 
 
 def _is_rate_limit_error(e: Exception) -> bool:
@@ -253,13 +262,49 @@ def _is_rate_limit_error(e: Exception) -> bool:
     return "429" in msg or "RESOURCE_EXHAUSTED" in msg
 
 
+def _is_model_usable(model_id: str) -> bool:
+    """Checks whether the model's circuit-breaker cooldown has expired."""
+    return time.time() >= _model_state.get(model_id, {}).get("until", 0.0)
+
+
+def _record_success(model_id: str) -> None:
+    """Resets consecutive failure counter on success."""
+    if model_id in _model_state:
+        _model_state[model_id]["consecutive_fails"] = 0
+
+
+def _record_failure(model_id: str, exc: Exception) -> None:
+    """Applies circuit-breaker penalties based on error category."""
+    if model_id not in _model_state:
+        _model_state[model_id] = {"until": 0.0, "consecutive_fails": 0}
+
+    s = _model_state[model_id]
+    err_str = str(exc)
+
+    if "404" in err_str or "NOT_FOUND" in err_str:
+        # Non-existent endpoint: drop permanently for this session
+        s["until"] = float("inf")
+        print(f"[circuit-breaker] Model '{model_id}' returned 404 (Not Found). Dropped permanently for this run.")
+    elif "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+        # Rate-limited: cooldown for 60 seconds
+        s["until"] = time.time() + 60.0
+        print(f"[circuit-breaker] Model '{model_id}' rate-limited (429). Cooled down for 60s.")
+    else:
+        s["consecutive_fails"] += 1
+        if s["consecutive_fails"] >= 3:
+            s["until"] = time.time() + 300.0
+            s["consecutive_fails"] = 0
+            print(f"[circuit-breaker] Model '{model_id}' failed 3 consecutive times. Cooled down for 5m.")
+
+
 @pxt.udf
-def gemini_caption(frame: pxt.Image) -> str:
-    """Generates a dense visual caption with dedicated OCR for a single video frame
-    by trying each model in GEMINI_CAPTION_MODELS in order, falling back to local
-    Florence-2 only if every Gemini model fails."""
+def gemini_caption(frame: pxt.Image) -> Optional[str]:
+    """Generates a dense visual caption with dedicated OCR for a single video frame.
+    Uses an active circuit breaker across the 12+ Gemini cascade models so exhausted
+    or dead models are skipped with zero latency. Falls back to Florence-2 only if
+    all Gemini options fail. Returns None on unindexable frames (no dummy sentinels)."""
     if frame is None:
-        return "unlabeled visual content"
+        return None
 
     if _genai_client is None:
         return _run_florence(frame)
@@ -267,7 +312,19 @@ def gemini_caption(frame: pxt.Image) -> str:
     if frame.mode != "RGB":
         frame = frame.convert("RGB")
 
-    for model_id in GEMINI_CAPTION_MODELS:
+    now = time.time()
+    usable_models = [m for m in GEMINI_CAPTION_MODELS if _is_model_usable(m)]
+
+    # If all models are in cooldown, briefly sleep up to min cooldown
+    if not usable_models:
+        min_until = min((_model_state[m]["until"] for m in GEMINI_CAPTION_MODELS), default=now)
+        wait_sec = min(30.0, max(0.0, min_until - now))
+        if wait_sec > 0:
+            print(f"[circuit-breaker] All Gemini models cooling down. Waiting {wait_sec:.1f}s...")
+            time.sleep(wait_sec)
+        usable_models = [m for m in GEMINI_CAPTION_MODELS if _is_model_usable(m)]
+
+    for model_id in usable_models:
         try:
             try:
                 response = _genai_client.models.generate_content(
@@ -290,14 +347,17 @@ def gemini_caption(frame: pxt.Image) -> str:
             if raw_caption:
                 assembled = parse_and_assemble_caption(raw_caption)
                 if assembled:
+                    _record_success(model_id)
                     return assembled
             print(f"[warn]  {model_id} returned an empty caption, trying next model...")
+            _record_failure(model_id, RuntimeError("Empty caption returned"))
         except Exception as e:
+            _record_failure(model_id, e)
             reason = "rate-limited" if _is_rate_limit_error(e) else f"{type(e).__name__}: {e!r}"
-            print(f"[warn]  {model_id} failed ({reason}), trying next model...")
+            print(f"[warn]  {model_id} failed ({reason}), trying next model in cascade...")
             continue
 
-    print("[warn]  All Gemini caption models failed for one frame, falling back to Florence-2.")
+    print("[warn]  All Gemini cascade models exhausted for this frame, falling back to local Florence-2.")
     return _run_florence(frame)
 
 
@@ -322,11 +382,11 @@ def _strip_fillers(text: str) -> str:
     return _normalize_ws(cleaned)
 
 
-def _compress_text(text: str) -> str:
+def _compress_text(text: str) -> Optional[str]:
     """Normalizes whitespace in visual captions without lowercasing or destroying
-    grammatical words. Preserves 'unlabeled visual content' fallback for frames that have no caption."""
+    grammatical words. Returns None for empty frames (no failure sentinels)."""
     cleaned = _normalize_ws(text) if text else ""
-    return cleaned if cleaned else "unlabeled visual content"
+    return cleaned if cleaned else None
 
 
 def _clean_audio_text(text: str) -> str:
@@ -396,9 +456,13 @@ def _compute_combined_caption_text(visual_caption: str, transcript: dict, timest
         ]
         audio_text = _strip_fillers(" ".join(m for m in matches if m))
 
-    if audio_text:
+    if visual_caption and audio_text:
         return f"{visual_caption} Spoken audio: {audio_text}".strip()
-    return visual_caption
+    elif visual_caption:
+        return visual_caption
+    elif audio_text:
+        return f"Spoken audio: {audio_text}".strip()
+    return None
 
 
 def backfill_combined_captions(title: str) -> None:

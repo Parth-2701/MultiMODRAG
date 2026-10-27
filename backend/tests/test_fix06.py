@@ -56,10 +56,10 @@ def test_compress_text_preserves_captions_and_handles_sentinel():
     # Multiple whitespace normalized
     assert _compress_text("  A   bright   red   apple  ") == "A bright red apple"
 
-    # Empty and None return sentinel placeholder
-    assert _compress_text("") == "unlabeled visual content"
-    assert _compress_text(None) == "unlabeled visual content"
-    assert _compress_text("   ") == "unlabeled visual content"
+    # Empty and None return None (FIX-11 eliminated dummy failure sentinels)
+    assert _compress_text("") is None
+    assert _compress_text(None) is None
+    assert _compress_text("   ") is None
 
 
 def test_clean_audio_text():
