@@ -206,29 +206,43 @@ GEMINI_CAPTION_MODELS = [
     "gemini-2.0-flash-lite"              # Base baseline model for high-throughput safety net
 ]
 
-GEMINI_PROMPT = """
-You are generating descriptions for frames extracted from a continuous video.
+from pydantic import BaseModel, Field
+from typing import List
 
-Treat this image as one moment in an ongoing sequence rather than as an isolated photograph. The video may belong to any domain, including educational content, lectures, tutorials, movies, animation, sports, gameplay, documentaries, news, surveillance, vlogs, advertisements, or presentations.
+# FIX-10: Pydantic structured output model for honest frame descriptions & OCR
+class FrameCaption(BaseModel):
+    scene: str = ""                                     # environment + setting
+    subjects: List[str] = Field(default_factory=list)  # people/characters/objects with visual attributes
+    actions: str = ""                                   # directly observable physical actions
+    on_screen_text: str = ""                            # verbatim transcript of slide titles, code, labels, subtitles
+    shot: str = ""                                      # close-up, wide shot, slide, screen recording...
 
-Write a detailed factual description that captures everything useful for video retrieval and question answering.
 
-Include:
-- The overall scene or environment.
-- Every significant person, character, animal, vehicle, or object.
-- What each visible subject is doing.
-- Interactions between subjects or objects.
-- Relative positions (foreground/background, left/right/center).
-- Any visible motion or changes occurring in this moment.
-- Readable text, subtitles, labels, signs, or UI elements.
-- Visual attributes such as colors, clothing, appearance, lighting, weather, and time of day if evident.
-- Camera viewpoint if obvious (close-up, wide shot, aerial view, over-the-shoulder, etc.).
+GEMINI_PROMPT = """You see ONE frame from a video. Describe only what is visible.
+Fill the fields. Transcribe all readable on-screen text VERBATIM in on_screen_text (slide titles, code,
+labels, numbers, subtitles); leave it empty if there is none. Do not infer identities, intentions,
+dialogue, or events before/after this frame."""
 
-Describe only what is directly observable in this frame.
-Do not infer identities, emotions, intentions, dialogue, or events that are not visually evident.
-Do not speculate about what happened before or after this frame.
-Write one coherent paragraph in natural language.
-"""
+
+def parse_and_assemble_caption(raw_text: str) -> str:
+    """Parses JSON FrameCaption or falls back gracefully to raw string."""
+    if not raw_text or not raw_text.strip():
+        return ""
+    text_to_parse = raw_text.strip()
+    if text_to_parse.startswith("```"):
+        text_to_parse = re.sub(r"^```(?:json)?\s*", "", text_to_parse, flags=re.IGNORECASE)
+        text_to_parse = re.sub(r"\s*```$", "", text_to_parse)
+
+    try:
+        c = FrameCaption.model_validate_json(text_to_parse)
+        subjects_str = " ".join(s.strip() for s in c.subjects if s.strip()) if isinstance(c.subjects, list) else str(c.subjects).strip()
+        parts = [p for p in [c.scene.strip(), subjects_str, c.actions.strip()] if p]
+        text = ". ".join(parts) if parts else (c.shot.strip() or "")
+        if c.on_screen_text and c.on_screen_text.strip():
+            text += f" Visible text: {c.on_screen_text.strip()}"
+        return text.strip() or raw_text.strip()
+    except Exception:
+        return raw_text.strip()
 
 
 _genai_client = genai.Client(api_key=api_key) if api_key else None
@@ -241,9 +255,9 @@ def _is_rate_limit_error(e: Exception) -> bool:
 
 @pxt.udf
 def gemini_caption(frame: pxt.Image) -> str:
-    """Generates a dense visual caption for a single video frame by trying each
-    model in GEMINI_CAPTION_MODELS in order (each has its own separate free-tier
-    quota), falling back to local Florence-2 only if every Gemini model fails."""
+    """Generates a dense visual caption with dedicated OCR for a single video frame
+    by trying each model in GEMINI_CAPTION_MODELS in order, falling back to local
+    Florence-2 only if every Gemini model fails."""
     if frame is None:
         return "unlabeled visual content"
 
@@ -255,13 +269,28 @@ def gemini_caption(frame: pxt.Image) -> str:
 
     for model_id in GEMINI_CAPTION_MODELS:
         try:
-            response = _genai_client.models.generate_content(
-                model=model_id,
-                contents=[frame, GEMINI_PROMPT],
-            )
-            caption = (response.text or "").strip()
-            if caption:
-                return caption
+            try:
+                response = _genai_client.models.generate_content(
+                    model=model_id,
+                    contents=[frame, GEMINI_PROMPT],
+                    config={
+                        "response_mime_type": "application/json",
+                        "response_schema": FrameCaption,
+                        "temperature": 0.1,
+                    },
+                )
+            except Exception:
+                # Fallback to plain prompt call if model does not support structured schema
+                response = _genai_client.models.generate_content(
+                    model=model_id,
+                    contents=[frame, GEMINI_PROMPT],
+                )
+
+            raw_caption = (response.text or "").strip()
+            if raw_caption:
+                assembled = parse_and_assemble_caption(raw_caption)
+                if assembled:
+                    return assembled
             print(f"[warn]  {model_id} returned an empty caption, trying next model...")
         except Exception as e:
             reason = "rate-limited" if _is_rate_limit_error(e) else f"{type(e).__name__}: {e!r}"
