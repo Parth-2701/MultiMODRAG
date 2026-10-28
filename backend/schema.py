@@ -24,6 +24,11 @@ from pixeltable.functions.gemini import embed_content
 from pixeltable.functions.video import frame_iterator
 from dotenv import load_dotenv
 
+try:
+    from backend.rag.embeddings import embed_query, embed_docs, DIM
+except ImportError:
+    from rag.embeddings import embed_query, embed_docs, DIM
+
 # 1. Load environment variables from .env file
 load_dotenv()
 
@@ -530,14 +535,29 @@ def backfill_combined_captions(title: str) -> None:
         .collect()
     )
 
+    items = []
+    texts_to_embed = []
     for row in frame_rows:
         timestamp = row['pos'] / FRAME_SAMPLE_FPS
         text = _compute_combined_caption_text(row['clean_caption'], transcript, timestamp)
-        frames.where((frames.title == title) & (frames.pos == row['pos'])).update(
-            {'combined_caption': text}
-        )
+        items.append((row['pos'], text))
+        texts_to_embed.append(text or "")
 
-    print(f"[schema] Backfilled combined_caption for {len(frame_rows)} frame(s) of {title!r}.")
+    # Batched document embedding (RETRIEVAL_DOCUMENT, normalized, 768-dim) (FIX-13)
+    vectors = []
+    try:
+        vectors = embed_docs(_genai_client, texts_to_embed, batch=100, dim=DIM)
+    except Exception as e:
+        print(f"[schema] Warning: embed_docs failed during backfill: {e}")
+        vectors = [None] * len(items)
+
+    for i, (pos, text) in enumerate(items):
+        payload = {'combined_caption': text}
+        if i < len(vectors) and vectors[i] is not None:
+            payload['combined_emb'] = vectors[i]
+        frames.where((frames.title == title) & (frames.pos == pos)).update(payload)
+
+    print(f"[schema] Backfilled combined_caption and combined_emb for {len(frame_rows)} frame(s) of {title!r}.")
 
 
 # 5. Wrap schema creation in a function to prevent transaction locks on import
@@ -611,6 +631,19 @@ def setup_db():
         idx_name='combined_caption_idx',
         embedding=embed_content.using(model='gemini-embedding-001'),
         if_exists='replace'
+    )
+
+    # FIX-13: Parallel task-typed normalized embedding column & index
+    frames_view.add_column(
+        combined_emb=pxt.Array[(DIM,), pxt.Float],
+        if_exists='ignore'
+    )
+    frames_view.add_embedding_index(
+        'combined_emb',
+        idx_name='combined_caption_emb_v2',
+        string_embed=embed_query,
+        metric='cosine',
+        if_exists='ignore'
     )
     print("[schema] Schema setup complete.")
 

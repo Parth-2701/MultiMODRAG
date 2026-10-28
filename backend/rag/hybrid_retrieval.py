@@ -52,7 +52,20 @@ def hybrid_search(frames, title: Optional[str], query: str, fps: float) -> List[
         flt = flt & (frames.title == title)
 
     # 1) dense: bounded top-K, DESCENDING similarity
-    sim = frames.combined_caption.similarity(query)
+    # Use task-typed v2 index if enabled (FIX-13) and available on table, fallback to legacy
+    use_v2 = os.environ.get("USE_TASK_EMBEDDINGS", "1") == "1"
+    sim = None
+    if use_v2 and hasattr(frames, "combined_emb"):
+        try:
+            sim = frames.combined_emb.similarity(string=query, idx="combined_caption_emb_v2")
+        except Exception:
+            sim = None
+
+    if sim is None:
+        try:
+            sim = frames.combined_caption.similarity(string=query)
+        except Exception:
+            sim = frames.combined_caption.similarity(query)
     dense = (
         frames.where(flt)
         .order_by(sim, asc=False)
