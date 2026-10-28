@@ -302,10 +302,57 @@ from typing import Optional, Dict, Any
 
 _genai_client = genai.Client(api_key=api_key) if api_key else None
 
+from collections import deque
+import numpy as np
+
 # FIX-11: Circuit breaker state per cascade model (until timestamp, consecutive failures)
 _model_state: Dict[str, Dict[str, Any]] = {
     m: {"until": 0.0, "consecutive_fails": 0} for m in GEMINI_CAPTION_MODELS
 }
+
+# FIX-17: Near-duplicate frame caption reuse (ingest optimization)
+DEDUP_WINDOW = int(os.environ.get("DEDUP_WINDOW", 4))
+HAMMING_MAX = int(os.environ.get("DEDUP_HAMMING", 3))
+PIXEL_DIFF_MAX = float(os.environ.get("DEDUP_PIXEL_DIFF", 6.0))
+
+_recent_frames = deque(maxlen=DEDUP_WINDOW)
+_reuse_count = 0
+
+
+def _dhash(img) -> int:
+    """Computes 64-bit difference hash (dHash) tracking horizontal luminance gradients."""
+    gray = img.convert("L").resize((9, 8))
+    g = np.asarray(gray, dtype=np.int16)
+    diff = (g[:, 1:] > g[:, :-1]).flatten()
+    return int("".join("1" if x else "0" for x in diff), 2)
+
+
+def _get_reused_caption(frame) -> Optional[str]:
+    """Checks if frame is a near-duplicate of recent frames. Returns cached caption or None."""
+    if not _recent_frames or frame is None:
+        return None
+    try:
+        h = _dhash(frame)
+        small = np.asarray(frame.convert("L").resize((32, 32)), dtype=np.float32)
+        for hh, sm, cap in reversed(_recent_frames):
+            hamming = bin(h ^ hh).count("1")
+            pixel_diff = float(np.abs(small - sm).mean())
+            if hamming <= HAMMING_MAX and pixel_diff <= PIXEL_DIFF_MAX:
+                return cap
+    except Exception as e:
+        print(f"[dedup] Warning during frame similarity check: {e}")
+    return None
+
+
+def _store_frame_caption(frame, caption: str) -> None:
+    """Stores recent frame representation and its caption in the sliding window cache."""
+    if frame is not None and caption:
+        try:
+            h = _dhash(frame)
+            small = np.asarray(frame.convert("L").resize((32, 32)), dtype=np.float32)
+            _recent_frames.append((h, small, caption))
+        except Exception:
+            pass
 
 
 def _is_rate_limit_error(e: Exception) -> bool:
@@ -363,6 +410,14 @@ def gemini_caption(frame: pxt.Image) -> Optional[str]:
     if frame.mode != "RGB":
         frame = frame.convert("RGB")
 
+    # FIX-17: Fast near-duplicate check before issuing network calls
+    reused = _get_reused_caption(frame)
+    if reused:
+        global _reuse_count
+        _reuse_count += 1
+        _store_frame_caption(frame, reused)
+        return reused
+
     now = time.time()
     usable_models = [m for m in GEMINI_CAPTION_MODELS if _is_model_usable(m)]
 
@@ -399,6 +454,7 @@ def gemini_caption(frame: pxt.Image) -> Optional[str]:
                 assembled = parse_and_assemble_caption(raw_caption)
                 if assembled:
                     _record_success(model_id)
+                    _store_frame_caption(frame, assembled)
                     return assembled
             print(f"[warn]  {model_id} returned an empty caption, trying next model...")
             _record_failure(model_id, RuntimeError("Empty caption returned"))
@@ -409,7 +465,10 @@ def gemini_caption(frame: pxt.Image) -> Optional[str]:
             continue
 
     print("[warn]  All Gemini cascade models exhausted for this frame, falling back to local Florence-2.")
-    return _run_florence(frame)
+    florence_cap = _run_florence(frame)
+    if florence_cap:
+        _store_frame_caption(frame, florence_cap)
+    return florence_cap
 
 
 # --- FIX-06: Text cleaning preserving grammatical phrasing, meaning, and casing ---
