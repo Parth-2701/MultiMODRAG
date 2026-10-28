@@ -67,6 +67,10 @@ try:
     from backend.rag.rerank import rerank
 except ImportError:
     from rag.rerank import rerank
+try:
+    from backend.rag.clip_intent import want_clip, calculate_clip_boundaries
+except ImportError:
+    from rag.clip_intent import want_clip, calculate_clip_boundaries
 
 # MCP client (for the video-clip-extraction tool server on port 9090)
 from mcp import ClientSession
@@ -360,95 +364,119 @@ async def chat_with_agent(request: ChatRequest):
         warn_approximate=policy.get("warn_approximate", False),
     )
 
+    clip_mode = os.environ.get("CLIP_MODE", "deterministic").lower()
+    is_clip_req = (intent_class == "clip_request") or want_clip(user_msg)
+
     try:
-        # Connect to the FastMCP microservice (video clip extraction tool)
-        print("🔗 Connecting to FastMCP server on port 9090...")
-        # sse_client has no default timeout, so a server that's up but not
-        # responding (or a dropped connection) can hang this forever with no
-        # error. Give the SSE handshake and the read stream explicit timeouts
-        # (seconds) so a stuck connection fails loudly instead of silently.
-        mcp_url = os.environ.get("MCP_SERVER_URL", "http://localhost:9090/sse")
-        async with sse_client(mcp_url, timeout=90, sse_read_timeout=60) as (read_stream, write_stream):
-            async with ClientSession(read_stream, write_stream) as session:
-                await session.initialize()
-
-                # Fetch available tools from the MCP server
-                mcp_tools = await session.list_tools()
-
-                # Convert MCP tool schemas into a format Gemini understands.
-                # tool.inputSchema is cleaned first — see _clean_schema_for_gemini.
-                gemini_tools = []
-                for tool in mcp_tools.tools:
-                    gemini_tools.append({
-                        "function_declarations": [{
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": _clean_schema_for_gemini(tool.inputSchema)
-                        }]
-                    })
-
-                print(f"🛠️ Fetched {len(mcp_tools.tools)} tools from FastMCP.")
-
-                # Call Gemini, providing the tools.
-                # DEBUG: this call previously gave no feedback if it hung — bound
-                # it with wait_for so a stall raises asyncio.TimeoutError instead
-                # of blocking the request indefinitely.
-                print("📤 Sending prompt to Gemini (with tools)...")
-                call_config = types.GenerateContentConfig(
-                    system_instruction=SYSTEM_INSTRUCTION,
-                    temperature=TEMP,
-                    tools=gemini_tools,
-                )
-                response = await asyncio.wait_for(
-                    genai_client.aio.models.generate_content(
-                        model=MODEL,
-                        contents=user_content,
-                        config=call_config,
-                    ),
-                    timeout=30,
-                )
-                print("📥 Gemini responded (with tools).")
-
-                # Check if Gemini decided to call a tool
-                if response.function_calls:
-                    for function_call in response.function_calls:
-                        tool_name = function_call.name
-                        tool_args = function_call.args
-                        print(f"🤖 Gemini requested tool: {tool_name} with args: {tool_args}")
-                        print(f"    (for reference, top frame's real timestamp was {top_timestamp:.1f}s)")
-
-                        if tool_name == "extract_video_clip":
-                            # Execute the tool on the MCP server!
-                            result = await session.call_tool("extract_video_clip", arguments=tool_args)
-
-                            # The MCP server returns a list of content objects (usually text)
+        if clip_mode == "deterministic":
+            # FIX-15: Deterministic clip selection from top evidence span (zero LLM timestamp hallucination)
+            if is_clip_req and spans:
+                best_span = spans[0]
+                clip_start, clip_dur = calculate_clip_boundaries(best_span)
+                print(f"🎬 [FIX-15] Deterministic clip cutting: {source_video_name} at {clip_start}s (dur={clip_dur}s)")
+                try:
+                    mcp_url = os.environ.get("MCP_SERVER_URL", "http://localhost:9090/sse")
+                    async with sse_client(mcp_url, timeout=90, sse_read_timeout=60) as (read_stream, write_stream):
+                        async with ClientSession(read_stream, write_stream) as session:
+                            await session.initialize()
+                            result = await session.call_tool(
+                                "extract_video_clip",
+                                arguments={
+                                    "video_filename": source_video_name,
+                                    "start_time": clip_start,
+                                    "duration": clip_dur,
+                                },
+                            )
                             tool_result_text = result.content[0].text
-                            print(f"✅ FastMCP Tool Result: {tool_result_text}")
-
-                            # If it was a success, it returns the relative path (e.g. 'clips/clip_123.mp4')
+                            print(f"✅ FastMCP Deterministic Tool Result: {tool_result_text}")
                             if not tool_result_text.startswith("Error"):
                                 final_clip_path = tool_result_text
+                except Exception as clip_err:
+                    print(f"⚠️ [FIX-15] Deterministic clip extraction failed: {clip_err!r}")
 
-                            # Send the result back to Gemini so it can finish its thought
-                            print("📤 Sending tool result back to Gemini...")
-                            response = await asyncio.wait_for(
-                                genai_client.aio.models.generate_content(
-                                    model=MODEL,
-                                    contents=[
-                                        user_content,
-                                        response.candidates[0].content,
-                                        types.Part.from_function_response(
-                                            name=tool_name,
-                                            response={"result": tool_result_text}
-                                        )
-                                    ],
-                                    config=call_config,
-                                ),
-                                timeout=30,
+            # Synthesize answer text with LLM (no tool calls needed)
+            call_config = types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION,
+                temperature=TEMP,
+            )
+            response = await asyncio.wait_for(
+                genai_client.aio.models.generate_content(
+                    model=MODEL,
+                    contents=user_content,
+                    config=call_config,
+                ),
+                timeout=30,
+            )
+            ai_response = response.text or (
+                f"I located the relevant scene at {top_timestamp:.1f}s."
+                if top_timestamp is not None
+                else "I analyzed the video."
+            )
+        else:
+            # FIX-15: LLM tool-calling mode with un-clobbered multi-turn conversation
+            mcp_url = os.environ.get("MCP_SERVER_URL", "http://localhost:9090/sse")
+            async with sse_client(mcp_url, timeout=90, sse_read_timeout=60) as (read_stream, write_stream):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    mcp_tools = await session.list_tools()
+                    gemini_tools = []
+                    for tool in mcp_tools.tools:
+                        gemini_tools.append({
+                            "function_declarations": [{
+                                "name": tool.name,
+                                "description": tool.description,
+                                "parameters": _clean_schema_for_gemini(tool.inputSchema),
+                            }]
+                        })
+
+                    call_config = types.GenerateContentConfig(
+                        system_instruction=SYSTEM_INSTRUCTION,
+                        temperature=TEMP,
+                        tools=gemini_tools,
+                    )
+                    contents = [user_content]
+                    ai_response = None
+                    for _ in range(2):
+                        response = await asyncio.wait_for(
+                            genai_client.aio.models.generate_content(
+                                model=MODEL,
+                                contents=contents,
+                                config=call_config,
+                            ),
+                            timeout=30,
+                        )
+                        if not response.function_calls:
+                            ai_response = response.text
+                            break
+
+                        contents.append(response.candidates[0].content)
+                        parts = []
+                        for fc in response.function_calls:
+                            tool_name = fc.name
+                            tool_args = fc.args
+                            print(f"🤖 Gemini requested tool: {tool_name} with args: {tool_args}")
+                            result = await session.call_tool(tool_name, arguments=tool_args)
+                            tool_result_text = result.content[0].text
+                            print(f"✅ FastMCP Tool Result: {tool_result_text}")
+                            if tool_name == "extract_video_clip" and not tool_result_text.startswith("Error"):
+                                final_clip_path = tool_result_text
+                            parts.append(
+                                types.Part.from_function_response(
+                                    name=tool_name,
+                                    response={"result": tool_result_text},
+                                )
                             )
-                            print("📥 Gemini responded (post-tool).")
+                        contents.append(types.Content(role="user", parts=parts))
 
-                ai_response = response.text
+                    if not ai_response:
+                        ai_response = (
+                            response.text
+                            or (
+                                f"I found the relevant scene at {top_timestamp:.1f}s."
+                                if top_timestamp is not None
+                                else "I extracted the requested video clip."
+                            )
+                        )
 
     except Exception as e:
         # anyio/mcp wraps connection failures in an ExceptionGroup ("unhandled
