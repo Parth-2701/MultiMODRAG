@@ -1,12 +1,23 @@
+"""backend/cleanup_indices.py: Maintenance script to drop legacy or duplicate indexes (FIX-14)."""
+
 import pixeltable as pxt
 
-frames = pxt.get_table('frames')
 
-# Drop all three duplicate indexes on clean_caption, then schema.py will
-# recreate exactly one with an explicit, stable name on the next run.
-for idx_name in ('idx2', 'idx3', 'idx4'):
+def cleanup_legacy_indices(table_name: str = "video_rag.frames"):
     try:
-        frames.drop_embedding_index(idx_name=idx_name)
-        print(f"✅ Dropped {idx_name}")
+        frames = pxt.get_table(table_name)
     except Exception as e:
-        print(f"⏭️  {idx_name}: {e}")
+        print(f"[cleanup] Could not access table {table_name!r}: {e}")
+        return
+
+    # Drop legacy un-named or duplicate indexes from earlier iterations
+    for idx_name in ("idx2", "idx3", "idx4", "clean_caption_idx"):
+        try:
+            frames.drop_embedding_index(idx_name=idx_name)
+            print(f"[ok] Dropped index {idx_name}")
+        except Exception as e:
+            print(f"[skip] {idx_name}: {e}")
+
+
+if __name__ == "__main__":
+    cleanup_legacy_indices()

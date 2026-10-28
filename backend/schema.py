@@ -26,8 +26,10 @@ from dotenv import load_dotenv
 
 try:
     from backend.rag.embeddings import embed_query, embed_docs, DIM
+    from backend.rag.index_version import check_or_update_index_version
 except ImportError:
     from rag.embeddings import embed_query, embed_docs, DIM
+    from rag.index_version import check_or_update_index_version
 
 # 1. Load environment variables from .env file
 load_dotenv()
@@ -626,12 +628,16 @@ def setup_db():
     # Dense Semantic Embedding Index — Gemini embeddings (remote, via Google's
     # Gemini API, also free tier), now over combined_caption (visual + audio)
     # instead of clean_caption alone, so retrieval covers both modalities.
+    # FIX-14: Use if_exists='ignore' to stop destructive re-embedding on every server start
     frames_view.add_embedding_index(
         'combined_caption',
         idx_name='combined_caption_idx',
         embedding=embed_content.using(model='gemini-embedding-001'),
-        if_exists='replace'
+        if_exists='ignore'
     )
+
+    # FIX-14: Track index configuration version to warn on drift instead of re-embedding
+    check_or_update_index_version()
 
     # FIX-13: Parallel task-typed normalized embedding column & index
     frames_view.add_column(
