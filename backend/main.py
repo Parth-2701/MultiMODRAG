@@ -278,8 +278,19 @@ async def chat_with_agent(request: ChatRequest):
     except pxt.exceptions.Error:
         raise HTTPException(status_code=500, detail="Database not initialized. Upload a video first.")
 
-    # Scope search to specific video using standalone_query
-    ranked_frames = hybrid_search(frames, target_filename, standalone_query, schema.FRAME_SAMPLE_FPS)
+    # FIX-18: Decode query image if present in request.image_base64
+    query_img = None
+    if getattr(request, "image_base64", None):
+        try:
+            from backend.rag.visual_index import decode_image_base64
+            query_img = decode_image_base64(request.image_base64)
+            if query_img is not None:
+                print("🖼️ [FIX-18] Decoded query image for visual retrieval")
+        except Exception as e:
+            print(f"[warn] Failed to decode query image: {e}")
+
+    # Scope search to specific video using standalone_query and optional query_image (FIX-18)
+    ranked_frames = hybrid_search(frames, target_filename, standalone_query, schema.FRAME_SAMPLE_FPS, query_image=query_img)
 
     if len(ranked_frames) == 0:
         still_processing = any(status == "processing" for status in task_store.values())

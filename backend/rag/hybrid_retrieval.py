@@ -47,7 +47,7 @@ def rrf(ranked_id_lists: list[list[Any]], k: int = RRF_K) -> list[tuple[Any, flo
             score[doc_id] = score.get(doc_id, 0.0) + 1.0 / (k + rank)
     return sorted(score.items(), key=lambda kv: -kv[1])
 
-def hybrid_search(frames, title: Optional[str], query: str, fps: float) -> List[Dict[str, Any]]:
+def hybrid_search(frames, title: Optional[str], query: str, fps: float, query_image: Optional[Any] = None) -> List[Dict[str, Any]]:
     flt = frames.combined_caption != None
     if title is not None:
         flt = flt & (frames.title == title)
@@ -89,14 +89,23 @@ def hybrid_search(frames, title: Optional[str], query: str, fps: float) -> List[
     order = sorted((i for i, s in enumerate(scores) if s > 0), key=lambda i: -scores[i])[:K_SPARSE]
     sparse_ids = [rows[i]["pos"] for i in order]
 
-    # 3) fuse two REAL ranked lists (empty sparse list -> falls back to dense only)
-    fused = rrf([dense_ids, sparse_ids], k=RRF_K)[:K_OUT]
+    # 3) visual: direct CLIP visual ranking (FIX-18)
+    visual_ids = []
+    try:
+        from backend.rag.visual_index import visual_rank
+        visual_ids = visual_rank(frames, title, query_text=query, query_image=query_image, k=K_DENSE)
+    except Exception:
+        visual_ids = []
+
+    # 4) fuse tri-modal ranked lists (dense + sparse + visual)
+    ranked_lists = [l for l in [dense_ids, sparse_ids, visual_ids] if l]
+    fused = rrf(ranked_lists, k=RRF_K)[:K_OUT] if ranked_lists else []
     by_pos = {r["pos"]: r for r in list(rows) + list(dense)}
     return [{
         "pos": pos,
         "timestamp_seconds": float(by_pos[pos].get("timestamp_sec", pos / fps)),
-        "caption": by_pos[pos]["combined_caption"],
-        "video_path": by_pos[pos]["video"],
-        "source_filename": by_pos[pos]["title"],
+        "caption": by_pos[pos].get("combined_caption", ""),
+        "video_path": by_pos[pos].get("video", ""),
+        "source_filename": by_pos[pos].get("title", title or "unknown.mp4"),
         "score": s,
-    } for pos, s in fused]
+    } for pos, s in fused if pos in by_pos]

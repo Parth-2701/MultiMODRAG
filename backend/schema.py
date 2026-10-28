@@ -720,6 +720,19 @@ def setup_db():
         metric='cosine',
         if_exists='ignore'
     )
+
+    # FIX-18: Direct multimodal visual embedding index (CLIP) on raw frame
+    try:
+        from pixeltable.functions.huggingface import clip
+        frames_view.add_embedding_index(
+            'frame',
+            idx_name='frame_clip_idx',
+            embedding=clip.using(model_id='openai/clip-vit-base-patch32'),
+            if_exists='ignore',
+        )
+    except Exception as e:
+        print(f"[schema] Notice: CLIP visual index setup deferred: {e}")
+
     print("[schema] Schema setup complete.")
 
 
