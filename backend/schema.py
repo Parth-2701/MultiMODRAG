@@ -137,8 +137,9 @@ def florence_caption(frame: pxt.Image) -> str:
 # api.openai.com anywhere in this path).
 from faster_whisper import WhisperModel
 
-WHISPER_MODEL_SIZE = "base.en"  # drop to "tiny.en" if memory is tight on deploy
+WHISPER_MODEL_SIZE = os.environ.get("WHISPER_MODEL_SIZE", "base")  # Multilingual base by default (FIX-12)
 _whisper_model = None
+
 
 def _get_whisper():
     global _whisper_model
@@ -149,28 +150,71 @@ def _get_whisper():
     return _whisper_model
 
 
+def _run_transcribe_audio(audio) -> dict:
+    """Core transcription logic decoupled from Pixeltable UDF wrapper for testability.
+
+    Robust faster-whisper execution (FIX-12):
+    - Multilingual model by default (WHISPER_MODEL_SIZE="base", or custom via env var)
+    - Silero VAD filtering (min_silence_duration_ms=500) to strip non-speech
+    - Hallucination gating (pruning no_speech_prob > 0.6 or avg_logprob < -1.0)
+    - condition_on_previous_text=False to prevent infinite repetition loops
+    - Explicit status contract: 'ok', 'silent', 'failed', or 'no_audio'
+    """
+    if audio is None:
+        return {
+            "status": "no_audio",
+            "language": "",
+            "language_probability": 0.0,
+            "text": "",
+            "segments": [],
+        }
+    try:
+        whisper = _get_whisper()
+        segments_iter, info = whisper.transcribe(
+            audio,
+            beam_size=5,
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 500},
+            condition_on_previous_text=False,
+        )
+        segs = []
+        for s in segments_iter:
+            # Drop segments flagged as non-speech or severe low-confidence hallucinations
+            if getattr(s, "no_speech_prob", 0.0) > 0.6 or getattr(s, "avg_logprob", 0.0) < -1.0:
+                continue
+            clean_text = s.text.strip()
+            if clean_text:
+                segs.append({"start": float(s.start), "end": float(s.end), "text": clean_text})
+
+        status = "ok" if segs else "silent"
+        lang = getattr(info, "language", "en") if info else "en"
+        lang_prob = getattr(info, "language_probability", 1.0) if info else 1.0
+
+        return {
+            "status": status,
+            "language": lang,
+            "language_probability": lang_prob,
+            "text": " ".join(s["text"] for s in segs),
+            "segments": segs,
+        }
+    except Exception as e:
+        print(f"[warn]  faster-whisper transcription failed: {e}")
+        return {
+            "status": "failed",
+            "error": str(e),
+            "language": "",
+            "language_probability": 0.0,
+            "text": "",
+            "segments": [],
+        }
+
+
 @pxt.udf
 def transcribe_audio(audio: pxt.Audio) -> dict:
     """Transcribes a video's extracted audio track using faster-whisper.
-    Returns {'text': ..., 'segments': [{'start', 'end', 'text'}, ...]}.
-    Never raises: a failed/silent/missing audio track just yields empty
-    segments, same defensive pattern as the Florence-2 fallback above — so a
-    video with no audio (or audio faster-whisper can't parse) still gets
-    fully indexed on its visual captions alone."""
-    try:
-        if audio is None:
-            return {"text": "", "segments": []}
-        whisper = _get_whisper()
-        segments_iter, _info = whisper.transcribe(audio, beam_size=1)
-        segments = []
-        text_parts = []
-        for seg in segments_iter:
-            segments.append({"start": seg.start, "end": seg.end, "text": seg.text})
-            text_parts.append(seg.text)
-        return {"text": " ".join(text_parts).strip(), "segments": segments}
-    except Exception as e:
-        print(f"[warn]  faster-whisper transcription failed: {e}")
-        return {"text": "", "segments": []}
+    Returns {'status': ..., 'language': ..., 'language_probability': ..., 'text': ..., 'segments': [...]}.
+    Defensively distinguishes silent audio from failed transcription."""
+    return _run_transcribe_audio(audio)
 
 
 # --- Primary captioner: a cascade of Gemini models (all free tier). Free of

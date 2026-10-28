@@ -101,14 +101,39 @@ def ensure_chunks(title: str):
         tbl.insert([{"title": title, **c} for c in chunks])
     return tbl
 
+def get_transcript_metadata(title: str) -> dict:
+    """Retrieves the raw transcript dict for a given video title from video_rag.videos."""
+    try:
+        videos = pxt.get_table("video_rag.videos")
+        row = videos.where(videos.title == title).select(videos.transcript).collect()
+        if len(row) and isinstance(row[0]["transcript"], dict):
+            return row[0]["transcript"]
+    except Exception:
+        pass
+    return {}
+
 def _fmt(c: dict) -> str:
     return f"[{mmss(c['start'])}–{mmss(c['end'])}] {c['text']}"
 
 def transcript_context(title: Optional[str], query: str) -> str:
     if not title:
         return ""
+
+    t_meta = get_transcript_metadata(title)
+    status = t_meta.get("status")
+
+    # Grounded context wording for non-OK statuses (FIX-12)
+    if status == "silent":
+        return "(this video has no detectable speech)"
+    elif status == "failed":
+        return "(speech transcription failed; answer from visuals only and say so)"
+    elif status == "no_audio":
+        return "(no audio track present in this video)"
+
     tbl = ensure_chunks(title)
     if tbl is None:
+        if status == "ok" and t_meta.get("text"):
+            return t_meta.get("text")
         return ""
 
     rows = (
@@ -118,6 +143,11 @@ def transcript_context(title: Optional[str], query: str) -> str:
         .collect()
     )
     if len(rows) == 0:
+        if status == "ok":
+            return "(no matching speech retrieved for this query)"
+        # Backward compatibility for legacy ingests without status
+        if t_meta and not t_meta.get("segments"):
+            return "(this video has no detectable speech)"
         return ""
 
     total_tokens = int(sum(len(r["text"].split()) for r in rows) * 1.3)
