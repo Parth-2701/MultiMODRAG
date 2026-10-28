@@ -47,6 +47,8 @@ storage/videos/*
 *.mov
 *.avi
 *.mkv
+*.png
+*.md
 
 # ===== OS / editor junk =====
 .DS_Store
@@ -58,3 +60,13 @@ Thumbs.db
 # ===== Logs / misc =====
 *.log
 .cache/
+
+# ===== Docker (keep local, do not commit) =====
+Dockerfile
+**/Dockerfile
+*.dockerignore
+**/.dockerignore
+docker-compose*.yml
+# ===== Tests & Evaluation (keep local, do not commit) =====
+backend/tests/
+eval/
