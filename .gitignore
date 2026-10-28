@@ -49,6 +49,8 @@ storage/videos/*
 *.mkv
 *.png
 *.md
+!MultiMODRAG Video RAG Pipeline.png
+Walkthrough.md
 
 # ===== OS / editor junk =====
 .DS_Store
