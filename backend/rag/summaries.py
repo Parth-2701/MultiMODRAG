@@ -129,14 +129,18 @@ async def ensure_summary(client: Any, title: str) -> Dict[str, Any]:
             transcript_segments = v_rows[0]["transcript"].get("segments", [])
 
         frames = pxt.get_table("video_rag.frames")
+        select_cols = [frames.pos, frames.combined_caption]
+        if hasattr(frames, "timestamp_sec"):
+            select_cols.append(frames.timestamp_sec)
         f_rows = (
             frames.where((frames.title == title) & (frames.combined_caption != None))
-            .select(frames.pos, frames.combined_caption)
+            .select(*select_cols)
             .order_by(frames.pos)
             .collect()
         )
         for r in f_rows:
-            frame_items.append({"time": float(r["pos"]), "text": r["combined_caption"]})
+            t = float(r.get("timestamp_sec", r["pos"]))
+            frame_items.append({"time": t, "text": r["combined_caption"]})
     except Exception as e:
         print(f"[summaries] Database introspection error for {title}: {e}")
 

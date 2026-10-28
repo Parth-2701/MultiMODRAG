@@ -531,16 +531,20 @@ def backfill_combined_captions(title: str) -> None:
         return
     transcript = video_rows[0]['transcript']
 
+    select_cols = [frames.pos, frames.clean_caption]
+    if hasattr(frames, "timestamp_sec"):
+        select_cols.append(frames.timestamp_sec)
+
     frame_rows = (
         frames.where(frames.title == title)
-        .select(frames.pos, frames.clean_caption)
+        .select(*select_cols)
         .collect()
     )
 
     items = []
     texts_to_embed = []
     for row in frame_rows:
-        timestamp = row['pos'] / FRAME_SAMPLE_FPS
+        timestamp = float(row.get('timestamp_sec', row['pos'] / FRAME_SAMPLE_FPS))
         text = _compute_combined_caption_text(row['clean_caption'], transcript, timestamp)
         items.append((row['pos'], text))
         texts_to_embed.append(text or "")
@@ -601,6 +605,12 @@ def setup_db():
         'video_rag.frames',
         videos,
         iterator=frame_iterator(video=videos.video, fps=FRAME_SAMPLE_FPS),
+        if_exists='ignore'
+    )
+
+    # FIX-16: Store real physical timestamp in seconds at ingest time
+    frames_view.add_computed_column(
+        timestamp_sec=frames_view.pos / float(FRAME_SAMPLE_FPS),
         if_exists='ignore'
     )
 

@@ -26,9 +26,10 @@ def tokenize(text: str) -> list[str]:
 _cache: dict[str, tuple] = {}   # title -> (signature, bm25, rows)
 
 def _lexical_index(frames, title: Optional[str], flt):
-    rows = frames.where(flt).select(
-        frames.pos, frames.combined_caption, frames.video, frames.title
-    ).collect()
+    select_cols = [frames.pos, frames.combined_caption, frames.video, frames.title]
+    if hasattr(frames, "timestamp_sec"):
+        select_cols.append(frames.timestamp_sec)
+    rows = frames.where(flt).select(*select_cols).collect()
     sig = (len(rows), max((r["pos"] for r in rows), default=-1))
     cache_key = title if title is not None else "__all__"
     hit = _cache.get(cache_key)
@@ -66,11 +67,14 @@ def hybrid_search(frames, title: Optional[str], query: str, fps: float) -> List[
             sim = frames.combined_caption.similarity(string=query)
         except Exception:
             sim = frames.combined_caption.similarity(query)
+    select_cols = [frames.pos, frames.combined_caption, frames.video, frames.title]
+    if hasattr(frames, "timestamp_sec"):
+        select_cols.append(frames.timestamp_sec)
     dense = (
         frames.where(flt)
         .order_by(sim, asc=False)
         .limit(K_DENSE)
-        .select(frames.pos, frames.combined_caption, frames.video, frames.title)
+        .select(*select_cols)
         .collect()
     )
     dense_ids = [r["pos"] for r in dense]
@@ -90,7 +94,7 @@ def hybrid_search(frames, title: Optional[str], query: str, fps: float) -> List[
     by_pos = {r["pos"]: r for r in list(rows) + list(dense)}
     return [{
         "pos": pos,
-        "timestamp_seconds": pos / fps,
+        "timestamp_seconds": float(by_pos[pos].get("timestamp_sec", pos / fps)),
         "caption": by_pos[pos]["combined_caption"],
         "video_path": by_pos[pos]["video"],
         "source_filename": by_pos[pos]["title"],
