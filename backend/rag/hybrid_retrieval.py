@@ -103,7 +103,7 @@ def hybrid_search(frames, title: Optional[str], query: str, fps: float, query_im
     by_pos = {r["pos"]: r for r in list(rows) + list(dense)}
     return [{
         "pos": pos,
-        "timestamp_seconds": float(by_pos[pos].get("timestamp_sec", pos / fps)),
+        "timestamp_seconds": float(by_pos[pos]["timestamp_sec"]) if by_pos[pos].get("timestamp_sec") is not None else float(pos / fps),
         "caption": by_pos[pos].get("combined_caption", ""),
         "video_path": by_pos[pos].get("video", ""),
         "source_filename": by_pos[pos].get("title", title or "unknown.mp4"),

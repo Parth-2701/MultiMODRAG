@@ -238,24 +238,24 @@ def transcribe_audio(audio: pxt.Audio) -> dict:
 from google import genai
 
 GEMINI_CAPTION_MODELS = [
-    # --- PRO TIER: Elite visual analysis, but tightest rate limits ---
-    "gemini-3.1-pro-preview",           # Deepest reasoning, highest overall quality
-    "gemini-3-pro-image",                # Dedicated Pro vision model, supreme pixel details
-    "gemini-2.5-pro",                    # Stable generation Pro tier
+    # --- HIGH-QUOTA PRODUCTION FLASH TIER (15 RPM / 1,500 RPD) ---
+    "gemini-2.5-flash",                  # Primary: reliable GA vision, high quota
+    "gemini-2.0-flash",                  # Fast, classic 2.0 engine
+    "gemini-2.5-flash-lite",             # High-throughput, generous daily quota
+    "gemini-2.0-flash-lite",             # Maximum daily headroom safety net
+    "gemini-2.5-flash-image",            # 2.5-era specialized vision
 
-    # --- FLASH TIER: High quality, standard production headroom ---
+    # --- ADVANCED FLASH PREVIEW TIER ---
     "gemini-3.5-flash",                  # Best balance of new capability & speed
     "gemini-3.1-flash-image",            # State-of-the-art specialized flash vision
-    "gemini-3-flash-preview",            # Strong 3-series fallback
-    "gemini-2.5-flash",                  # Highly stable GA version
-    "gemini-2.5-flash-image",            # 2.5-era specialized vision
-    "gemini-2.0-flash",                  # Fast, classic 2.0 engine
-
-    # --- LITE TIER: Maximum free-tier RPM/RPD headroom ---
     "gemini-3.1-flash-lite",             # Highest quality of the low-latency tiers
     "gemini-3.1-flash-lite-image",       # Specialized fast-vision endpoint
-    "gemini-2.5-flash-lite",             # Most generous daily request quota (RPD)
-    "gemini-2.0-flash-lite"              # Base baseline model for high-throughput safety net
+    "gemini-3-flash-preview",            # Strong 3-series fallback
+
+    # --- PRO TIER (Reserved for deep fallback, tight RPM) ---
+    "gemini-3.1-pro-preview",           # Deepest reasoning, highest overall quality
+    "gemini-3-pro-image",                # Dedicated Pro vision model, supreme pixel details
+    "gemini-2.5-pro",                    # Legacy Pro tier (handled by circuit breaker)
 ]
 
 from pydantic import BaseModel, Field
@@ -464,7 +464,20 @@ def gemini_caption(frame: pxt.Image) -> Optional[str]:
             print(f"[warn]  {model_id} failed ({reason}), trying next model in cascade...")
             continue
 
-    print("[warn]  All Gemini cascade models exhausted for this frame, falling back to local Florence-2.")
+    # Tier 2: OpenRouter Free Multimodal Cascade Fallback
+    try:
+        from backend.rag.openrouter import caption_frame_openrouter
+        openrouter_cap = caption_frame_openrouter(frame, GEMINI_PROMPT)
+        if openrouter_cap:
+            assembled = parse_and_assemble_caption(openrouter_cap)
+            if assembled:
+                _store_frame_caption(frame, assembled)
+                return assembled
+    except Exception as e:
+        print(f"[openrouter] Notice: OpenRouter fallback call failed: {e}")
+
+    # Tier 3: Local Florence-2 Offline Fallback
+    print("[warn]  All remote vision models exhausted for this frame, falling back to local Florence-2.")
     florence_cap = _run_florence(frame)
     if florence_cap:
         _store_frame_caption(frame, florence_cap)
@@ -603,9 +616,10 @@ def backfill_combined_captions(title: str) -> None:
     items = []
     texts_to_embed = []
     for row in frame_rows:
-        timestamp = float(row.get('timestamp_sec', row['pos'] / FRAME_SAMPLE_FPS))
+        raw_ts = row.get('timestamp_sec')
+        timestamp = float(raw_ts) if raw_ts is not None else float(row['pos'] / FRAME_SAMPLE_FPS)
         text = _compute_combined_caption_text(row['clean_caption'], transcript, timestamp)
-        items.append((row['pos'], text))
+        items.append((row['pos'], text, timestamp))
         texts_to_embed.append(text or "")
 
     # Batched document embedding (RETRIEVAL_DOCUMENT, normalized, 768-dim) (FIX-13)
@@ -616,7 +630,7 @@ def backfill_combined_captions(title: str) -> None:
         print(f"[schema] Warning: embed_docs failed during backfill: {e}")
         vectors = [None] * len(items)
 
-    for i, (pos, text) in enumerate(items):
+    for i, (pos, text, timestamp) in enumerate(items):
         payload = {'combined_caption': text}
         if i < len(vectors) and vectors[i] is not None:
             payload['combined_emb'] = vectors[i]

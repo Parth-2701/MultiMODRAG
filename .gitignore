@@ -72,3 +72,5 @@ docker-compose*.yml
 # ===== Tests & Evaluation (keep local, do not commit) =====
 backend/tests/
 eval/
+storage/summaries
+storage/*.txt

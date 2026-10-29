@@ -255,6 +255,37 @@ async def list_videos():
     return {"videos": result}
  
 # --- API ENDPOINTS: CHAT (TRUE HYBRID SEARCH + MCP TOOLS) ---
+CHAT_CASCADE_MODELS = [
+    MODEL,
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash-lite",
+    "gemini-3-flash-preview",
+]
+
+async def _call_gemini_with_fallback(client, contents, config, timeout=30):
+    """Executes generate_content across CHAT_CASCADE_MODELS to survive 429 quota exhaustion."""
+    last_err = None
+    for m in CHAT_CASCADE_MODELS:
+        try:
+            return await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=m,
+                    contents=contents,
+                    config=config,
+                ),
+                timeout=timeout,
+            )
+        except Exception as e:
+            last_err = e
+            err_str = str(e)
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "404" in err_str or "503" in err_str:
+                print(f"⚠️  [chat] Model '{m}' unavailable ({type(e).__name__}), trying next in cascade...")
+                continue
+            raise e
+    if last_err:
+        raise last_err
+
+
 @app.post("/api/v1/chat", response_model=ChatResponse)
 async def chat_with_agent(request: ChatRequest):
     user_msg = request.message
@@ -410,12 +441,10 @@ async def chat_with_agent(request: ChatRequest):
                 system_instruction=SYSTEM_INSTRUCTION,
                 temperature=TEMP,
             )
-            response = await asyncio.wait_for(
-                genai_client.aio.models.generate_content(
-                    model=MODEL,
-                    contents=user_content,
-                    config=call_config,
-                ),
+            response = await _call_gemini_with_fallback(
+                genai_client,
+                contents=user_content,
+                config=call_config,
                 timeout=30,
             )
             ai_response = response.text or (
@@ -448,12 +477,10 @@ async def chat_with_agent(request: ChatRequest):
                     contents = [user_content]
                     ai_response = None
                     for _ in range(2):
-                        response = await asyncio.wait_for(
-                            genai_client.aio.models.generate_content(
-                                model=MODEL,
-                                contents=contents,
-                                config=call_config,
-                            ),
+                        response = await _call_gemini_with_fallback(
+                            genai_client,
+                            contents=contents,
+                            config=call_config,
                             timeout=30,
                         )
                         if not response.function_calls:
@@ -501,13 +528,14 @@ async def chat_with_agent(request: ChatRequest):
             print(f"⚠️  MCP/tool-calling path failed: {type(e).__name__}: {e!r}")
         print("↩️  Falling back to plain Gemini call without tools...")
         try:
-            response = await genai_client.aio.models.generate_content(
-                model=MODEL,
+            response = await _call_gemini_with_fallback(
+                genai_client,
                 contents=user_content,
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_INSTRUCTION,
                     temperature=TEMP,
                 ),
+                timeout=30,
             )
             ai_response = response.text
         except Exception as inner_e:

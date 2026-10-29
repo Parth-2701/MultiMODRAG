@@ -139,7 +139,7 @@ async def ensure_summary(client: Any, title: str) -> Dict[str, Any]:
             .collect()
         )
         for r in f_rows:
-            t = float(r.get("timestamp_sec", r["pos"]))
+            raw_t = r.get("timestamp_sec"); t = float(raw_t) if raw_t is not None else float(r["pos"] / FRAME_SAMPLE_FPS)
             frame_items.append({"time": t, "text": r["combined_caption"]})
     except Exception as e:
         print(f"[summaries] Database introspection error for {title}: {e}")

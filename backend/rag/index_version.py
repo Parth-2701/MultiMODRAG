@@ -9,7 +9,7 @@ Ensures that:
 import os
 
 INDEX_VERSION = "gemini-embedding-001/combined_caption/v1"
-DEFAULT_VERSION_FILE = os.path.join("storage", "index_version.txt")
+DEFAULT_VERSION_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "storage", "index_version.txt"))
 
 
 def check_or_update_index_version(
