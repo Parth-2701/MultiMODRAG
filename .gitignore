@@ -48,6 +48,7 @@ storage/videos/*
 *.avi
 *.mkv
 *.png
+*.jpg
 *.md
 !MultiMODRAG Video RAG Pipeline.png
 Walkthrough.md
