@@ -51,6 +51,8 @@ storage/videos/*
 *.jpg
 *.md
 !MultiMODRAG Video RAG Pipeline.png
+!Ingestion_Pipeline.png
+!Retrieval_And_Query_Pipeline.png
 Walkthrough.md
 
 # ===== OS / editor junk =====
