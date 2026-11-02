@@ -3,13 +3,13 @@ import os
 import json
 import re
 from typing import Optional, Dict, Any, List
-
+import schema
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_STORAGE = os.path.abspath(os.path.join(BASE_DIR, "..", "..", "storage", "summaries"))
 SUMMARIES_DIR = os.environ.get("SUMMARIES_DIR", DEFAULT_STORAGE)
 SUMMARY_MODEL = os.environ.get("SUMMARY_MODEL", "gemini-2.5-flash")
 BUCKET_SEC = float(os.environ.get("SUMMARY_BUCKET_SEC", 120.0))  # 2 minutes per bucket
-
+FRAME_SAMPLE_FPS = schema.FRAME_SAMPLE_FPS
 
 def _get_storage_dir() -> str:
     os.makedirs(SUMMARIES_DIR, exist_ok=True)
