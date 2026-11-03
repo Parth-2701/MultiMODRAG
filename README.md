@@ -155,9 +155,11 @@ Video ingestion runs asynchronously in the background so API calls return immedi
    The raw `frame` image column is indexed using OpenAI CLIP (`openai/clip-vit-base-patch32`) via Pixeltable's internal vector index (`frame_clip_idx`). This builds an Approximate Nearest Neighbor (ANN) index over raw pixels, enabling zero-shot image-to-image and text-to-image searches.
 
 7. **Temporal Alignment & Batch Document Embeddings:**
-   `schema.backfill_combined_captions()` merges spoken dialogue from the Whisper transcript with visual frame captions using a $\pm 0.5$s temporal window:
-   $$\text{combined\_caption} = \text{visual\_caption} + \text{" Spoken audio: "} + \text{audio\_text}$$
-   Captions are embedded in batches of 100 using Google's embedding model configured with `task_type="RETRIEVAL_DOCUMENT"`, truncated to 768 dimensions using Matryoshka Representation Learning (MRL), and normalized to unit length ($\|v\|_2 = 1.0$).
+   `schema.backfill_combined_captions()` merges spoken dialogue from the Whisper transcript with visual frame captions using a temporal window of $`\pm 0.5`$ seconds:
+   ```math
+   \text{combined\_caption} = \text{visual\_caption} + \text{" Spoken audio: "} + \text{audio\_text}
+   ```
+   Captions are embedded in batches of 100 using Google's embedding model configured with `task_type="RETRIEVAL_DOCUMENT"`, truncated to 768 dimensions using Matryoshka Representation Learning (MRL), and normalized to unit length ($`\|v\|_2 = 1.0`$).
 
 ---
 
@@ -212,7 +214,7 @@ Dense + BM25 hybrid search                                                - FFmp
    Conversation turns are isolated by `(session_id, video_title)`. If a follow-up query contains pronouns or temporal references (e.g., _"What did he do next?"_), `condense_query` passes recent conversational turns to Gemini Flash to rewrite it into a self-contained query (_"What did Chandragupta do after meeting Chanakya?"_). Queries longer than 8 words without pronouns bypass condensation to minimize latency.
 
 2. **Sub-Millisecond Intent Routing:**
-   `route()` uses compiled regular expressions to classify queries in $<0.05$ms into five intent classes:
+   `route()` uses compiled regular expressions to classify queries in $`<0.05`$ ms into five intent classes:
    - `needle`: Precision lookup (top 6 spans, sorted by score).
    - `temporal`: Sequential timelines (top 14 spans, sorted chronologically).
    - `aggregate`: Counting events (top 20 spans, sorted chronologically, with an approximate sampling notice).
@@ -226,14 +228,17 @@ Dense + BM25 hybrid search                                                - FFmp
    - **Visual:** Decodes optional base64 query images or queries the CLIP index using text to rank frames directly by pixel similarity.
 
 4. **Reciprocal Rank Fusion (RRF):**
-   Raw cosine similarities and BM25 scores cannot be directly added. RRF combines candidate rankings without score calibration issues using smoothing constant $k=60$:
-   $$\text{RRF Score}(d) = \sum_{m \in \{\text{Dense}, \text{BM25}, \text{Visual}\}} \frac{1}{60 + \text{rank}_m(d)}$$
+   Raw cosine similarities and BM25 scores cannot be directly added. RRF combines candidate rankings without score calibration issues using smoothing constant `k = 60`:
+
+   ```math
+   \text{RRF Score}(d) = \sum_{m \in \{\text{Dense}, \text{BM25}, \text{Visual}\}} \frac{1}{60 + \text{rank}_m(d)}
+   ```
 
 5. **Second-Stage Neural Cross-Attention Reranking:**
    Bi-encoders evaluate queries and documents in isolation. The top 30 RRF candidates pass through `rerank()`, which presents candidates directly to Gemini Flash to score relevance on a 0–3 scale with stable tie-breaking.
 
 6. **Temporal Span Clustering & Scene Deduplication:**
-   Individual 1-second frame hits are grouped into continuous video scenes (`to_spans`). Frames separated by $\le 2.5$s are merged up to a 20.0s window. Jaccard token similarity ($\ge 0.8$) suppresses near-identical visual captions across static scenes.
+   Individual 1-second frame hits are grouped into continuous video scenes (`to_spans`). Frames separated by $`\le 2.5`$ seconds are merged up to a 20.0s window. Jaccard token similarity ($`\ge 0.8`$) suppresses near-identical visual captions across static scenes.
 
 7. **Dedicated Speech Retrieval:**
    `transcript_context()` queries 45-second sliding transcript segments with 1-segment overlap. For silent or music-only videos, it injects explicit status markers (`(this video has no detectable speech)`), preventing the LLM from hallucinating dialogue.
@@ -255,7 +260,7 @@ Dense + BM25 hybrid search                                                - FFmp
 | **Speech Processing**         | Faster-Whisper, Silero VAD, FFmpeg                                | Local CPU int8 audio transcription, voice activity detection, hallucination gating |
 | **Vision & Captioning**       | Google Gemini (Flash Cascade), Florence-2 Base                    | Multimodal frame captioning, OCR extraction, offline CPU fallback                  |
 | **Visual Search Index**       | OpenAI CLIP (`vit-base-patch32`)                                  | Direct zero-shot text-to-image and image-to-image visual vector similarity         |
-| **Embeddings**                | Gemini (`gemini-embedding-001` / `text-embedding-004`)            | Asymmetric 768d Matryoshka embeddings with $L_2$ unit normalization                |
+| **Embeddings**                | Gemini (`gemini-embedding-001` / `text-embedding-004`)            | Asymmetric 768d Matryoshka embeddings with $`L_2`$ unit normalization              |
 | **Lexical Search**            | Rank-BM25, Snowball Stemmer                                       | Exact keyword matching, proper noun and technical acronym retrieval                |
 | **LLM Synthesis**             | Google GenAI SDK (`gemini-2.5-flash`, `gemini-3.1-flash-lite`)    | Grounded multi-turn answer generation with rate-limit cascade failover             |
 | **Tool Execution**            | FastMCP (Model Context Protocol), FFmpeg                          | Standalone microservice for keyframe-accurate MP4 video slicing                    |
